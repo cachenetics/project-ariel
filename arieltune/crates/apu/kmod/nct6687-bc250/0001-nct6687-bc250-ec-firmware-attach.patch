@@ -1,0 +1,81 @@
+diff --git a/nct6687.c b/nct6687.c
+index dd555ef..a314e55 100644
+--- a/nct6687.c
++++ b/nct6687.c
+@@ -138,6 +138,11 @@ static const char *const nct6687_chip_names[] = {
+ 
+ #define NCT6687_LD_ACPI 0x0a
+ #define NCT6687_LD_HWM 0x0b
++
++/* EC-firmware NCT6686D (ASRock BC-250) hard-codes its EC I/O window here; the
++ * SIO base-address register is open-bus on cold access. Matches nct6683's
++ * detected "0x2e:0xa20". */
++#define NCT6687_EC_FORCED_BASE 0x0a20
+ #define NCT6687_LD_VID 0x0d
+ 
+ #define SIO_REG_LDSEL 0x07		 /* Logical device select */
+@@ -1597,6 +1602,7 @@ static int __init nct6687_find(int sioaddr, struct nct6687_sio_data *sio_data)
+ 	u16 verify;
+ 	u16 val;
+ 	int err;
++	bool ec_forced = false;
+ 
+ 	err = superio_enter(sioaddr);
+ 	if (err)
+@@ -1620,6 +1626,31 @@ static int __init nct6687_find(int sioaddr, struct nct6687_sio_data *sio_data)
+ 	default:
+ 		if (force)
+ 		{
++			/*
++			 * EC-firmware NCT6686D (e.g. ASRock BC-250 carrier board)
++			 * does not expose the SIO chip-ID register: SIO_REG_DEVID
++			 * reads back 0xffff (open bus) even though the EC data
++			 * window at LD_HWM and the full NCT6686D register map are
++			 * present and correct — the in-kernel nct6683 driver detects
++			 * this same chip via the EC space and reads it fine. Accept
++			 * it under force=1 and treat it as an nct6686. Sensor
++			 * readings are validated against the known-good nct6683
++			 * values before any PWM write is attempted.
++			 */
++			/*
++			 * Gate to the primary SIO port (0x2e): the BC-250 EC lives
++			 * there. A 0xffff at the secondary port (0x4e) is genuine
++			 * open-bus (nothing present) — accepting it too would make
++			 * both ports resolve to the same EC base 0x0a20 and collide
++			 * on platform-device registration (nct6687.2592, -EEXIST).
++			 */
++			if (val == 0xffff && sioaddr == 0x2e)
++			{
++				pr_warn("force=1: SIO chip-ID reads 0xffff (EC-firmware mode, e.g. ASRock BC-250); attaching as NCT6686D\n");
++				sio_data->kind = nct6686;
++				ec_forced = true;
++				break;
++			}
+ 			/*
+ 			 * Only allow force=1 on chips whose ID is plausibly in the
+ 			 * Nuvoton NCT668x family (upper nibble 0xD). Other vendors'
+@@ -1658,7 +1689,23 @@ static int __init nct6687_find(int sioaddr, struct nct6687_sio_data *sio_data)
+ 	ssleep(1);
+ 	verify = (superio_inb(sioaddr, SIO_REG_ADDR) << 8) | superio_inb(sioaddr, SIO_REG_ADDR + 1);
+ 
+-	if (address == 0 || address != verify)
++	/*
++	 * On the EC-firmware NCT6686D the SIO logical-device base-address
++	 * register (0x60) is open-bus (reads 0xffff / garbage) on cold access —
++	 * the BIOS-assigned EC I/O window is not re-exposed through SIO config
++	 * space. The in-kernel nct6683 reads it as 0x0a20 on this board; when
++	 * we forced attach via the 0xffff chip-ID path, don't trust the SIO
++	 * read at all — use the known-good EC base directly so the EC data
++	 * window (paged page/index/data at base+4/5/6) can be reached. Readings
++	 * are validated against nct6683 before any PWM write.
++	 */
++	if (ec_forced)
++	{
++		pr_warn("force=1: EC-mode, using known EC base 0x%04x (SIO read 0x%04x)\n",
++			(u16)NCT6687_EC_FORCED_BASE, address);
++		address = NCT6687_EC_FORCED_BASE;
++	}
++	else if (address == 0 || address != verify)
+ 	{
+ 		pr_err("EC base I/O port unconfigured\n");
+ 		goto fail;

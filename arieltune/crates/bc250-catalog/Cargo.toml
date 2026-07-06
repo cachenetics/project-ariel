@@ -1,0 +1,9 @@
+[package]
+name = "bc250-catalog"
+description = "The authored ASRock BC-250 (Cyan Skillfish / Ariel APU) OEM System Manual — the shared knowledge layer for the BC-250 tool family"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

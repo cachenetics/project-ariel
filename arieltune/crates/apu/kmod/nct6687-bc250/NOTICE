@@ -1,0 +1,18 @@
+nct6687-bc250 - licensing notice
+================================
+
+This subtree (the `0001-nct6687-bc250-ec-firmware-attach.patch` kernel patch and
+the `prebuilt/*.ko` module built from it) is a derivative work of the out-of-tree
+Linux kernel driver:
+
+    Fred78290/nct6687d  -  https://github.com/Fred78290/nct6687d
+    upstream commit cd735225a95e04dda3e2befd94ba77e1f7609dcc
+    original author: Frederic Boltz
+
+That driver is licensed **GPL-2.0**, and this derivative subtree inherits
+GPL-2.0-only -- the same license (GPL-2.0-only) that covers the arieltune
+project at the repository top level. arieltune carries this subtree as an asset
+the way a package manager carries the patches it applies.
+
+The corresponding upstream source and this subtree's patch satisfy the GPL-2.0
+source-availability requirement for the shipped `prebuilt/*.ko` binary.

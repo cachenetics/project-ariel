@@ -1,0 +1,29 @@
+#version 450
+// aputune CU health-test — known-answer integer compute (KAT).
+//
+// Each invocation runs a deterministic integer chain seeded by its global id.
+// All arithmetic is u32 wrapping, so a CPU reference reproduces the result
+// bit-exactly — a defective ALU in the routed WGP shows up as a checksum
+// mismatch, a hang shows up as device-lost, and a weak WGP shows up as a slow
+// dispatch. No floating point (FP rounding would defeat the bit-exact compare).
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Out { uint data[]; };
+
+layout(push_constant) uniform PC {
+    uint n;      // number of live invocations
+    uint iters;  // chain length per invocation
+};
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n) return;
+    uint x = idx * 2654435761u + 0x9e3779b9u;
+    for (uint i = 0u; i < iters; i++) {
+        x = x * 1664525u + 1013904223u;   // Numerical Recipes LCG
+        x ^= x >> 15;
+        x += idx + i;
+    }
+    data[idx] = x;
+}

@@ -1,0 +1,18 @@
+[Unit]
+Description=arieltune poke driver — poke on each request logged by %i
+# %i is the llama.cpp server unit to watch, e.g. aputune-poke@llama-server.
+# NB: no After=/Wants= on aputune-autosleep — that creates a multi-user.target
+# ordering cycle. The poke driver is independent; journalctl -f just waits, and
+# pokes are harmless if autosleep isn't up yet.
+After=%i.service
+
+[Service]
+# Tail the watched unit's journal and poke aputune on every per-request line
+# (llama.cpp logs "... | task N |" per slot activity). Keeps `gpu autosleep` at
+# the top clock while the server is serving; it deep-sleeps when requests stop.
+ExecStart=/bin/sh -c 'exec journalctl -f -o cat -n0 -u %i.service | grep --line-buffered -E "\\| task [0-9]" | while read -r _; do /usr/local/bin/arieltune apu gpu poke; done'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

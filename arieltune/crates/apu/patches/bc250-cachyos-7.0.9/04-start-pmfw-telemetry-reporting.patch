@@ -1,0 +1,62 @@
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 17:54:21.281387095 +0000
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 17:48:27.919363387 +0000
+@@ -140,15 +140,57 @@
+ 	return -ENOMEM;
+ }
+ 
++/*
++ * Default PMFW telemetry sample interval (microseconds).
++ *
++ * BC-250 PMFW msgid 0x1B (StartTelemetryReporting) takes a sample-interval
++ * argument; arg=0 returns FF (rejected). 1000 us = 1 ms gives PMFW frequent
++ * samples for the Current/Average fields in SmuMetrics_t without excessive
++ * SMN traffic. Empirically chosen — adjust if min/max values become noisy
++ * or the chip shows additional power draw.
++ */
++#define CYAN_SKILLFISH_TELEMETRY_INTERVAL_US	1000
++
++static int cyan_skillfish_start_telemetry(struct smu_context *smu)
++{
++	int ret;
++
++	ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_StartTelemetryReporting,
++					      CYAN_SKILLFISH_TELEMETRY_INTERVAL_US,
++					      NULL);
++	if (ret)
++		dev_warn(smu->adev->dev,
++			 "cyan_skillfish: StartTelemetryReporting(%u us) failed: %d\n",
++			 CYAN_SKILLFISH_TELEMETRY_INTERVAL_US, ret);
++	else
++		dev_dbg(smu->adev->dev,
++			"cyan_skillfish: PMFW telemetry started at %u us interval\n",
++			CYAN_SKILLFISH_TELEMETRY_INTERVAL_US);
++
++	return ret;
++}
++
+ static int cyan_skillfish_init_smc_tables(struct smu_context *smu)
+ {
+-	int ret = 0;
++	int ret;
+ 
+ 	ret = cyan_skillfish_tables_init(smu);
+ 	if (ret)
+ 		return ret;
+ 
+-	return smu_v11_0_init_smc_tables(smu);
++	ret = smu_v11_0_init_smc_tables(smu);
++	if (ret)
++		return ret;
++
++	/*
++	 * Kick PMFW telemetry on so SmuMetrics_t {Current, Average, Accnt}
++	 * are populated for downstream metrics-table readers. Best-effort —
++	 * failure here is non-fatal; the chip still works, the Average/Accnt
++	 * fields just won't update.
++	 */
++	(void)cyan_skillfish_start_telemetry(smu);
++
++	return 0;
+ }
+ 
+ static int

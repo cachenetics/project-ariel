@@ -1,0 +1,10 @@
+[package]
+name = "arieltune-tui-kit"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Shared TUI chrome for the arieltune suite: the Screen trait, Outcome, theme, and common widgets."
+
+[dependencies]
+crossterm = "0.28"
+ratatui = "0.29"

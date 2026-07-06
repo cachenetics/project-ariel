@@ -1,0 +1,10 @@
+[package]
+name = "ariel-hal"
+description = "Silicon-generic low-level access for the Ariel (Cyan Skillfish) APU: PCI presence, amdgpu debugfs discovery, and the raw SMN aperture primitive"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"

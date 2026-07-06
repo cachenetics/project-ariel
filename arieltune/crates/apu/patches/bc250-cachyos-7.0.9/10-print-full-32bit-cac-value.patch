@@ -1,0 +1,19 @@
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 18:58:30.103716775 +0000
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 18:52:49.098700943 +0000
+@@ -891,8 +891,15 @@
+ 			n += scnprintf(buf + n, buf_size - n,
+ 				       "%3d: ERR %d\n", i, ret);
+ 		} else {
++			/*
++			 * Print the full 32-bit response. The PMFW returns
++			 * additional context in the high bits — e.g. slot
++			 * 23 of GFX CAC reads 0x000701xx where 0x07 in the
++			 * upper byte is meaningful state and 0xxx is the
++			 * tuned weight. Stripping to %04x lost that info.
++			 */
+ 			n += scnprintf(buf + n, buf_size - n,
+-				       "%3d: 0x%04x\n", i, value & 0xffff);
++				       "%3d: 0x%08x\n", i, value);
+ 		}
+ 	}
+ 

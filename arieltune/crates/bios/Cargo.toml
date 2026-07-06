@@ -1,0 +1,17 @@
+[package]
+name = "bios"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "BIOS tab: the BC-250 AMD CBS + OEM Setup surface (browse + edit + CLI)."
+
+[dependencies]
+bc250-board = { path = "../bc250-board" }
+arieltune-tui-kit = { path = "../arieltune-tui-kit" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"

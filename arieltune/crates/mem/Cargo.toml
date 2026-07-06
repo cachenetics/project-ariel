@@ -1,0 +1,28 @@
+[package]
+name = "mem"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "MEM tab: BC-250 GDDR6 memory-timing tuner (browse + edit + bench + CLI)."
+
+[dependencies]
+ariel-compute = { path = "../ariel-compute" }
+arieltune-tui-kit = { path = "../arieltune-tui-kit" }
+# The APU governor owns the poke-file path (single-writer clock IPC): the bench
+# WRITES the poke, the governor daemon READS it. Import the path const from `apu`
+# so the two can never drift. (apu does not depend on mem -- no cycle.)
+apu = { path = "../apu" }
+# H2: identity-gate the CMOS actuator on BC-250 (PCI 1002:13fe) so a --write on a
+# non-BC-250 host with /dev/port can't corrupt that machine's CMOS.
+bc250-board = { path = "../bc250-board" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `ash` is still a direct dep: the bench keeps its own Vulkan session logic and
+# uses the vk types. It is pinned to the SAME 0.38 ariel-compute links, so the
+# device/queue/memprops handed back by `with_session` are the identical types.
+ash = "0.38"
+libc = "0.2"

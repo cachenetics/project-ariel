@@ -1,0 +1,11 @@
+[package]
+name = "bc250-board"
+description = "BC-250 board identity: APU-family-first detection (Ariel APU + DMI board gate) and the BIOS write-safety Compat verdict"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+ariel-hal = { path = "../ariel-hal" }

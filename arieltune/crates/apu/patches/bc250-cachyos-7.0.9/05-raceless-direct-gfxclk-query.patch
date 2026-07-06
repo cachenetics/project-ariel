@@ -1,0 +1,36 @@
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 18:03:13.160944938 +0000
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 17:57:23.840981565 +0000
+@@ -267,9 +267,10 @@
+ 
+ 	switch (sensor) {
+ 	case AMDGPU_PP_SENSOR_GFX_SCLK:
+-		ret = cyan_skillfish_get_smu_metrics_data(smu,
+-						   METRICS_CURR_GFXCLK,
+-						   (uint32_t *)data);
++		/* Direct Q0 query — race-free during compute. See
++		 * cyan_skillfish_get_current_clk_freq for rationale. */
++		ret = smu_cmn_send_smc_msg(smu, SMU_MSG_QueryGfxclk,
++					   (uint32_t *)data);
+ 		*(uint32_t *)data *= 100;
+ 		*size = 4;
+ 		break;
+@@ -333,8 +334,17 @@
+ 	switch (clk_type) {
+ 	case SMU_GFXCLK:
+ 	case SMU_SCLK:
+-		member_type = METRICS_CURR_GFXCLK;
+-		break;
++		/*
++		 * Prefer direct PMFW query over the metrics-table path for
++		 * GFXCLK. Q0 PPSMC_MSG_QueryGfxclk is serialized with
++		 * amdgpu's other SMU traffic via smu->msg_ctl.lock and is
++		 * race-free during GPU compute, whereas reading from
++		 * SmuMetrics_t via TransferTableSmu2Dram has empirically
++		 * raced on BC-250 (empirically observed). PMFW returns
++		 * MHz directly; caller-side conversion is the same as the
++		 * metrics path.
++		 */
++		return smu_cmn_send_smc_msg(smu, SMU_MSG_QueryGfxclk, value);
+ 	case SMU_FCLK:
+ 	case SMU_MCLK:
+ 		member_type = METRICS_CURR_UCLK;

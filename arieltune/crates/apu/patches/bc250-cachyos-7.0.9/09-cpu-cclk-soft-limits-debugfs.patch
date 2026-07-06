@@ -1,0 +1,120 @@
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 18:49:35.474825265 +0000
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 18:43:25.809234318 +0000
+@@ -911,6 +911,9 @@
+ static struct cyan_cac_file_ctx cyan_gfx_cac_ctx;
+ static struct cyan_cac_file_ctx cyan_l3_cac_ctx;
+ 
++static void cyan_skillfish_create_cclk_debugfs(struct amdgpu_device *adev,
++					        struct dentry *root);
++
+ void cyan_skillfish_create_cac_debugfs(struct amdgpu_device *adev)
+ {
+ 	struct dentry *root;
+@@ -936,6 +939,107 @@
+ 			    root, &cyan_gfx_cac_ctx, &cyan_cac_fops);
+ 	debugfs_create_file("cyan_skillfish_l3_cac_weight", S_IRUSR,
+ 			    root, &cyan_l3_cac_ctx, &cyan_cac_fops);
++
++	cyan_skillfish_create_cclk_debugfs(adev, root);
++}
++
++/*
++ * BC-250 CCLK (CPU clock) floor/ceiling debugfs interface.
++ *
++ * Two write-mostly files under /sys/kernel/debug/dri/N/:
++ *   cyan_skillfish_cclk_soft_min  - sends PPSMC_MSG_SetSoftMinCclk (0x35)
++ *   cyan_skillfish_cclk_soft_max  - sends PPSMC_MSG_SetSoftMaxCclk (0x36)
++ *
++ * Write a decimal integer (MHz) and the driver sends the matching msgid
++ * with arg=value. Verified HANDLER on PMFW 88.6.0 (arg=0 is
++ * accepted as no-op).
++ *
++ * Read returns the last-written value (cached driver-side; PMFW exposes
++ * no Query* counterpart for these msgids).
++ *
++ * Bounded to [0, 5000] MHz to catch obvious user errors. PMFW will reject
++ * out-of-range values with -EIO; pass-through. Root-only (0600).
++ *
++ * Intended for CPU/GPU power coordination experiments; affects CPU not
++ * GPU. Be conservative — lowering CCLK ceiling can hang the userspace
++ * shell that's running the test.
++ */
++
++#define CYAN_SKILLFISH_CCLK_MAX_MHZ	5000
++
++struct cyan_cclk_file_ctx {
++	struct amdgpu_device *adev;
++	uint16_t smu_msg;
++	uint32_t last_value;
++};
++
++static ssize_t cyan_cclk_read(struct file *f, char __user *ubuf,
++			      size_t count, loff_t *pos)
++{
++	struct cyan_cclk_file_ctx *ctx = f->f_inode->i_private;
++	char out[32];
++	int n;
++
++	n = scnprintf(out, sizeof(out), "%u\n", ctx->last_value);
++	return simple_read_from_buffer(ubuf, count, pos, out, n);
++}
++
++static ssize_t cyan_cclk_write(struct file *f, const char __user *ubuf,
++			       size_t count, loff_t *pos)
++{
++	struct cyan_cclk_file_ctx *ctx = f->f_inode->i_private;
++	struct smu_context *smu = ctx->adev->powerplay.pp_handle;
++	char line[32];
++	unsigned int value;
++	int n, ret;
++
++	if (!smu)
++		return -ENODEV;
++	if (count >= sizeof(line))
++		return -EINVAL;
++	if (copy_from_user(line, ubuf, count))
++		return -EFAULT;
++	line[count] = '\0';
++
++	n = sscanf(line, "%u", &value);
++	if (n != 1)
++		return -EINVAL;
++	if (value > CYAN_SKILLFISH_CCLK_MAX_MHZ)
++		return -ERANGE;
++
++	ret = smu_cmn_send_smc_msg_with_param(smu, ctx->smu_msg, value, NULL);
++	if (ret)
++		return ret;
++
++	ctx->last_value = value;
++	return count;
++}
++
++static const struct file_operations cyan_cclk_fops = {
++	.owner = THIS_MODULE,
++	.read = cyan_cclk_read,
++	.write = cyan_cclk_write,
++	.llseek = default_llseek,
++};
++
++static struct cyan_cclk_file_ctx cyan_cclk_min_ctx;
++static struct cyan_cclk_file_ctx cyan_cclk_max_ctx;
++
++static void cyan_skillfish_create_cclk_debugfs(struct amdgpu_device *adev,
++					        struct dentry *root)
++{
++	cyan_cclk_min_ctx.adev = adev;
++	cyan_cclk_min_ctx.smu_msg = SMU_MSG_SetSoftMinCclk;
++	cyan_cclk_min_ctx.last_value = 0;
++
++	cyan_cclk_max_ctx.adev = adev;
++	cyan_cclk_max_ctx.smu_msg = SMU_MSG_SetSoftMaxCclk;
++	cyan_cclk_max_ctx.last_value = 0;
++
++	debugfs_create_file("cyan_skillfish_cclk_soft_min", S_IRUSR | S_IWUSR,
++			    root, &cyan_cclk_min_ctx, &cyan_cclk_fops);
++	debugfs_create_file("cyan_skillfish_cclk_soft_max", S_IRUSR | S_IWUSR,
++			    root, &cyan_cclk_max_ctx, &cyan_cclk_fops);
+ }
+ 
+ #else  /* !CONFIG_DEBUG_FS */

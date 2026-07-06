@@ -1,0 +1,19 @@
+[Unit]
+Description=arieltune apply saved CU routing profile (BC-250)
+After=multi-user.target
+# Only if a service profile has been saved (aputune cu route-save).
+ConditionPathExists=/var/lib/aputune/route.json
+ConditionPathExists=/sys/module/amdgpu/parameters/bc250_cc_write_mode
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Re-applies the WGP routing saved with `aputune cu route-save` — e.g. routing
+# around a CU the health-test flagged. Live register writes via umr; no reboot
+# semantics, just restores the chosen dispatch mask after a fresh boot.
+ExecStart=/usr/local/bin/arieltune apu cu route-load
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

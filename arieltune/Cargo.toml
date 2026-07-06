@@ -1,0 +1,45 @@
+[package]
+name = "arieltune"
+version = "0.1.0"
+edition = "2021"
+description = "Unified BC-250 tuning suite: one tabbed TUI (WIKI | BIOS | APU | MEM) merging wikitune/biostune/aputune/memtune. Ariel = the AMD APU silicon codename."
+license = "GPL-2.0-only"
+repository = "https://github.com/cachenetics/project-ariel"
+readme = "README.md"
+
+[[bin]]
+name = "arieltune"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+ratatui = "0.29"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+arieltune-tui-kit = { path = "crates/arieltune-tui-kit" }
+wiki = { path = "crates/wiki" }
+bios = { path = "crates/bios" }
+mem = { path = "crates/mem" }
+apu = { path = "crates/apu" }
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/arieltune-tui-kit",
+    "crates/bc250-catalog",
+    "crates/wiki",
+    "crates/bios",
+    "crates/mem",
+    "crates/apu",
+    "crates/ariel-hal",
+    "crates/bc250-board",
+    "crates/ariel-smu",
+    "crates/ariel-compute",
+]
+
+[profile.release]
+lto = true
+strip = true

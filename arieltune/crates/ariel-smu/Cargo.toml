@@ -1,0 +1,11 @@
+[package]
+name = "ariel-smu"
+description = "Silicon-generic SMU mailboxes for the Ariel APU: the kernel-serialized queue-0 GPU mailbox (smu) and the queue-3 CPU-OC mailbox (ocq3)"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+ariel-hal = { path = "../ariel-hal" }

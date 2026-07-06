@@ -1,0 +1,17 @@
+GPL-2.0 NOTICE -- BC-250 amdgpu liberation patch series
+========================================================
+
+The patch files in this directory (`bc250-cachyos-7.0.9/*.patch`) are diffs
+against the Linux kernel (the amdgpu driver / AMD SMU code), applied on top of
+a CachyOS 7.0.2 tree. Because they are derivative works of the Linux kernel,
+they are licensed **GPL-2.0-only**, the same license as the code they modify --
+and the same license (GPL-2.0-only) that covers the arieltune project at the
+repository top level.
+
+- Base work: the Linux kernel (https://kernel.org), GPL-2.0-only, (c) its many
+  contributors; the CachyOS patch set (https://github.com/CachyOS).
+- These patches: (c) 2026 Cachenetics, GPL-2.0-only.
+
+The arieltune top level carries these patches as build assets (applied by the
+APU tab's kernel-build path). If you redistribute the patches or a kernel built
+from them, they remain GPL-2.0-only.

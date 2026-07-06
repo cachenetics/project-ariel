@@ -1,0 +1,10 @@
+[package]
+name = "ariel-compute"
+description = "Silicon-generic Vulkan compute harness: one process-wide device behind a serializing mutex, asset-free SPIR-V dispatch (callers supply shaders)"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[dependencies]
+anyhow = "1"
+ash = "0.38"

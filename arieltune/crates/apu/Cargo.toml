@@ -1,0 +1,25 @@
+[package]
+name = "apu"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "APU tab: BC-250 APU liberation + CPU/GPU/CU tuner (browse + edit + KAT + CLI). Was aputune."
+
+[dependencies]
+# Shared cores lifted in M2: the SMU q0/q3 mailboxes, silicon-generic HAL, the
+# single-device Vulkan compute harness, the board map, and the suite TUI kit.
+ariel-smu = { path = "../ariel-smu" }
+ariel-hal = { path = "../ariel-hal" }
+ariel-compute = { path = "../ariel-compute" }
+bc250-board = { path = "../bc250-board" }
+arieltune-tui-kit = { path = "../arieltune-tui-kit" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+# NOTE: no direct `ash` dep. All GPU work (the CU health-test KAT) goes through
+# `ariel_compute::with_session`, which re-exports the exact `ash` it links — so
+# the KAT and the MEM bench serialize on the ONE shared device + compute mutex.

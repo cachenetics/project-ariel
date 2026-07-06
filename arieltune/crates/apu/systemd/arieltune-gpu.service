@@ -1,0 +1,26 @@
+# arieltune GPU power — THE one GPU power unit (reference copy; aputune installs
+# and rewrites this itself via `persist::ensure_gpu_unit`). `gpu apply-boot`
+# reads /var/lib/aputune/power.json and enacts the persisted mode: manual pin,
+# fence-rate governor, poke-driven autosleep, or released (native DPM). Mode
+# changes edit power.json + restart this unit — it is never disabled.
+[Unit]
+Description=arieltune GPU power (manual pin or auto governor, per power.json)
+After=multi-user.target
+
+[Service]
+Type=simple
+# The manual/released branches exit 0 once applied; RemainAfterExit keeps the
+# unit active (exited) and Restart=on-failure won't restart an exit-0.
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+# The governor/autosleep branches run forever, and the boot-settle wait
+# (sdma-ring anti-wedge) lives INSIDE apply-boot — the start timeout must
+# never kill it.
+TimeoutStartSec=infinity
+ExecStart=/usr/local/bin/arieltune apu gpu apply-boot
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
