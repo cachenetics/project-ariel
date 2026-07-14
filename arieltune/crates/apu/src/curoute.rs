@@ -221,19 +221,24 @@ pub fn cu_count(masks: &[u32; 4]) -> u32 {
 
 /// Diagnostic of a per-array WGP mask set.
 ///
-/// REAL MATH (measured, KAT compute GFLOPS on gfx1013; 12-config sweep with any
-/// GPU inference server stopped). Compute throughput is gated by the TWO
-/// LEAST-populated shader arrays:
-///     effective_CU = 4 × (w₁ + w₂)     w₁,w₂ = the two smallest per-array WGP
+/// REAL MATH (measured, KAT compute GFLOPS on gfx1013; sweep with any GPU
+/// inference server stopped). Compute throughput is gated by the LEAST-populated
+/// shader ENGINE, not by individual arrays. SE0 = arrays (0,0)+(0,1), SE1 =
+/// arrays (1,0)+(1,1); the two engines dispatch waves in parallel, so throughput
+/// tracks the weaker engine:
+///     effective_CU = 4 × min(SE0 WGP total, SE1 WGP total)
+///                  = 2 × (CU count of the least-populated shader engine)
 ///     GFLOPS ≈ 44 × effective_CU       at 1500 MHz  (≈ 0.029 × eff_CU × clock)
-/// Fits all 12 configs exactly. For a BALANCED shape the two smallest equal the
-/// rest, so eff_CU == routed CU and throughput is linear in routed CU (verified
-/// 8/16/24/32/40 CU -> 357/710/1058/1408/1750 GFLOPS). For an UNBALANCED shape the
-/// two biggest arrays are capped to the two smallest, so the penalty is large, not
-/// small: e.g. 5/5/1/1 routes 24 CU but delivers 8 (357 GFLOPS). WGPs are
-/// homogeneous (2 CU each). This supersedes the old "populated × shallowest depth"
-/// model (which only counted the single minimum) and is a distinct, compute-only
-/// law — memory-bound LLM inference weights array population differently.
+/// The WGP split WITHIN an engine does not matter (5/1 dispatches like 3/3, both
+/// = 6 WGP in that engine); only the per-engine totals do. Verified across the
+/// sweep including the discriminating permutations: 5/1/5/1 measures 1058 GFLOPS
+/// (eff 24, both engines = 6 WGP) while 5/5/1/1 measures 357 (eff 8, SE1 = 2 WGP)
+/// — same four arrays, different engine grouping, 3× apart. For BALANCED engines
+/// eff_CU == routed CU; an engine imbalance wastes the stronger engine down to the
+/// weaker one. WGPs are homogeneous (2 CU each). This supersedes the earlier
+/// "two smallest arrays" and "populated × shallowest depth" models (both were
+/// engine-balanced special cases) and is a distinct, compute-only law —
+/// memory-bound LLM inference weights array population differently.
 ///
 /// An EMPTY shader array is also a SAFETY concern: dispatching compute with a whole
 /// array gated off has hung this silicon; the empty-array compute case is untested,
@@ -248,14 +253,14 @@ pub struct RouteShape {
     pub populated: usize,
     /// Shallowest populated array's WGP count (0 if none populated).
     pub min_populated_wgp: u32,
-    /// Effective CU = 4 × (two smallest per-array WGP) — the MEASURED throughput
-    /// driver: GFLOPS ≈ 44 × this at 1500 MHz. Equals `cu` when balanced; less when
-    /// the two biggest arrays out-run the two smallest.
+    /// Effective CU = 4 × min(SE0 WGP total, SE1 WGP total) — the MEASURED
+    /// throughput driver: GFLOPS ≈ 44 × this at 1500 MHz. Equals `cu` when the two
+    /// engines are balanced; less when one engine out-populates the other.
     pub effective_cu: u32,
     /// Indices of fully-gated (empty) arrays.
     pub empty_arrays: Vec<usize>,
-    /// Unequal per-array WGP — the two biggest arrays are wasted down to the two
-    /// smallest (see `effective_cu`).
+    /// Engine imbalance — the two shader engines hold unequal WGP totals, so the
+    /// stronger engine is wasted down to the weaker one (see `effective_cu`).
     pub unbalanced: bool,
 }
 
@@ -265,14 +270,18 @@ pub fn shape(masks: &[u32; 4]) -> RouteShape {
     let pop: Vec<u32> = per.iter().copied().filter(|&c| c > 0).collect();
     let populated = pop.len();
     let min_populated_wgp = pop.iter().copied().min().unwrap_or(0);
-    // Effective CU (MEASURED, compute-bound): throughput is gated by the TWO
-    // least-populated shader arrays — eff_CU = 4 × (sum of the two smallest
-    // per-array WGP counts). Verified exact across a 12-config sweep.
-    // Balanced shapes -> eff == routed; unbalanced -> the two biggest arrays are
-    // capped to the two smallest.
-    let mut sorted = per;
-    sorted.sort_unstable();
-    let effective_cu = 4 * (sorted[0] + sorted[1]);
+    // Effective CU (MEASURED, compute-bound): throughput is gated by the
+    // LEAST-populated shader ENGINE, not by individual arrays. The two engines
+    // (SE0 = arrays 0,1; SE1 = arrays 2,3) dispatch waves in parallel, so real
+    // throughput tracks the weaker engine:
+    //     eff_CU = 4 × min(SE0 WGP total, SE1 WGP total)
+    //            = 2 × (CU count of the least-populated shader engine)
+    // The split WITHIN an engine does not matter (5/1 dispatches like 3/3);
+    // only the per-engine totals do. Balanced engines -> eff == routed; an
+    // engine imbalance wastes the stronger engine down to the weaker one.
+    let se0_wgp = per[0] + per[1];
+    let se1_wgp = per[2] + per[3];
+    let effective_cu = 4 * se0_wgp.min(se1_wgp);
     RouteShape {
         cu: cu_count(masks),
         per_array_wgp: per,
@@ -280,7 +289,9 @@ pub fn shape(masks: &[u32; 4]) -> RouteShape {
         min_populated_wgp,
         effective_cu,
         empty_arrays: (0..4).filter(|&i| per[i] == 0).collect(),
-        unbalanced: pop.iter().any(|&c| c != min_populated_wgp),
+        // Engine imbalance (SE0 total != SE1 total) is what leaves CU on the
+        // table; an uneven split within a single engine does not.
+        unbalanced: se0_wgp != se1_wgp,
     }
 }
 
@@ -307,9 +318,14 @@ impl RouteShape {
         }
         if self.unbalanced {
             out.push(format!(
-                "unequal WGP per array ({:?}) — throughput is gated by the two smallest: \
-                 only {} effective CU of {} routed. Balance to recover the rest.",
-                self.per_array_wgp, self.effective_cu, self.cu
+                "shader engines unbalanced ({:?} WGP/array; SE0={}, SE1={} WGP) — throughput \
+                 is gated by the weaker engine: only {} effective CU of {} routed. Even the \
+                 two engines to recover the rest.",
+                self.per_array_wgp,
+                self.per_array_wgp[0] + self.per_array_wgp[1],
+                self.per_array_wgp[2] + self.per_array_wgp[3],
+                self.effective_cu,
+                self.cu
             ));
         }
         out
@@ -384,36 +400,43 @@ mod tests {
 
     #[test]
     fn shape_skewed_is_flagged_unbalanced() {
-        // 4/2/1/1 -> 16 routed CU, but eff = 4 × (two smallest WGP = 1+1) = 8 CU
-        // (measured: 357 GFLOPS ≈ 44 × 8). The two biggest arrays are wasted down
-        // to the two smallest; the warning flags it.
+        // 4/2/1/1 -> 16 routed CU, but eff = 4 × min(SE0=6, SE1=2) = 8 CU
+        // (measured: 357 GFLOPS ≈ 44 × 8). The stronger engine is wasted down to
+        // the weaker one; the warning flags it.
         let s = shape(&[0x0f, 0x03, 0x01, 0x01]);
         assert_eq!(s.cu, 16);
         assert_eq!(s.effective_cu, 8);
         assert!(s.unbalanced);
         assert!(s.empty_arrays.is_empty());
-        assert!(s.warnings().iter().any(|w| w.contains("unequal")));
+        assert!(s.warnings().iter().any(|w| w.contains("unbalanced")));
     }
 
     #[test]
-    fn shape_two_smallest_model_matches_sweep() {
-        // Measured (eff = GFLOPS/44): each = 4 × (two smallest WGP).
+    fn shape_engine_model_matches_sweep() {
+        // Measured (eff = GFLOPS/44): eff = 4 × min(SE0 WGP total, SE1 WGP total).
         assert_eq!(shape(&[0x1f, 0x1f, 0x1f, 0x01]).effective_cu, 24); // 5/5/5/1
         assert_eq!(shape(&[0x1f, 0x0f, 0x03, 0x01]).effective_cu, 12); // 5/4/2/1
         assert_eq!(shape(&[0x1f, 0x1f, 0x01, 0x01]).effective_cu, 8); // 5/5/1/1
-        assert_eq!(shape(&[0x0f, 0x0f, 0x0f, 0x0f]).effective_cu, 32); // 4/4/4/4 balanced
+        assert_eq!(shape(&[0x0f, 0x0f, 0x0f, 0x0f]).effective_cu, 32); // 4/4/4/4
+        // Discriminators: same four arrays {5,5,1,1}, engine grouping decides.
+        // 5/1/5/1 splits the small arrays across engines (both SE = 6 WGP) -> 24;
+        // 5/5/1/1 stacks them in SE1 (SE1 = 2 WGP) -> 8. Measured 1058 vs 357.
+        assert_eq!(shape(&[0x1f, 0x01, 0x1f, 0x01]).effective_cu, 24); // 5/1/5/1
+        assert!(!shape(&[0x1f, 0x01, 0x1f, 0x01]).unbalanced); // engines even
+        assert!(shape(&[0x1f, 0x1f, 0x01, 0x01]).unbalanced); // engines skewed
+        assert_eq!(shape(&[0x07, 0x07, 0x07, 0x07]).effective_cu, 24); // 3/3/3/3
     }
 
     #[test]
     fn shape_two_full_arrays_flags_empty() {
-        // 5/0/5/0: two empty arrays. The compute eff formula (two smallest = 0,0)
-        // degenerates to 0 here — the empty-array COMPUTE case is untested/unsafe
-        // (this shape only ran memory-bound), so we flag it rather than trust eff.
+        // 5/0/5/0: one full array per engine, so both engines hold 5 WGP and the
+        // engine model gives eff = 4 × min(5,5) = 20. But the empty-ARRAY compute
+        // case is untested on our box and apply() refuses it, so we still flag it.
         let s = shape(&[FULL_MASK, 0, FULL_MASK, 0]);
         assert_eq!(s.cu, 20);
         assert_eq!(s.populated, 2);
-        assert_eq!(s.effective_cu, 0);
-        assert!(!s.unbalanced); // the two populated arrays are equal depth
+        assert_eq!(s.effective_cu, 20);
+        assert!(!s.unbalanced); // both engines hold 5 WGP
         assert_eq!(s.empty_arrays, vec![1, 3]);
         assert!(s.warnings().iter().any(|w| w.contains("empty")));
     }

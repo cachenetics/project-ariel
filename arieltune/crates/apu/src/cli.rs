@@ -448,8 +448,8 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
                         "  masks: [{:02x} {:02x} {:02x} {:02x}]  ({:?} WGP/array)",
                         m[0], m[1], m[2], m[3], s.per_array_wgp
                     );
-                    // Compute throughput is gated by the TWO smallest arrays
-                    // (eff_CU = 4 x (w1+w2)); bench for the real GFLOPS.
+                    // Compute throughput is gated by the least-populated shader
+                    // ENGINE (eff_CU = 4 x min(SE0,SE1) WGP); bench for real GFLOPS.
                     println!(
                         "  routed: {}/40 CU ({} arrays, {} effective)",
                         s.cu, s.populated, s.effective_cu

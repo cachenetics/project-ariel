@@ -183,9 +183,9 @@ arieltune stands on prior BC-250 community work. With thanks:
   layout and timing semantics; and **walkjivefly** for taking the first plunge.
 
 Building on that, we contribute our **CU map** back to the commons - the shader-array
-topology and the empirical dispatch model (`effective_CU = 4 × the two smallest
-per-array WGP`) that predicts real throughput from a CU routing. See
-[`docs/bc250-cu-map.md`](docs/bc250-cu-map.md).
+topology and the empirical dispatch model (`effective_CU = 4 × min(SE0, SE1) WGP total`,
+i.e. throughput is gated by the weaker shader engine) that predicts real throughput from a
+CU routing. See [`docs/bc250-cu-map.md`](docs/bc250-cu-map.md).
 
 ## License
 

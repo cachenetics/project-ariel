@@ -54,34 +54,44 @@ per shader array. Boot-time application: the amdgpu patch
 ## The dispatch model (the "CU map" finding)
 
 **Routed CU count does NOT predict throughput.** Compute-bound throughput on gfx1013 is
-gated by the **two least-populated shader arrays**:
+gated by the **least-populated shader engine**. The two engines (SE0 = arrays `(0,0)+(0,1)`,
+SE1 = arrays `(1,0)+(1,1)`) dispatch waves in parallel, so real throughput tracks the
+weaker engine:
 
 ```
-effective_CU = 4 × (w1 + w2)
+effective_CU = 4 × min(SE0_wgp, SE1_wgp)   =   2 × (CU of the least-populated engine)
 
-  where w1, w2 = the two smallest per-array WGP counts (of the 4 arrays)
+  where SE0_wgp = per-array WGP of (0,0) + (0,1),  SE1_wgp = (1,0) + (1,1)
 ```
 
 - **Compute-bound** (KAT / clpeak GFLOPS): `GFLOPS ≈ 44 × effective_CU` at 1500 MHz.
-- Balanced shapes: the two smallest equal the rest, so `effective_CU == routed_CU` and
-  throughput is linear in routed CU.
-- Unbalanced shapes: the two **biggest** arrays are wasted down to the two smallest - a
-  large penalty, not a small one.
+- The WGP split **within** an engine does not matter: `5/1` in an engine dispatches like
+  `3/3` (both 6 WGP). Only the two per-engine totals count.
+- Balanced engines (`SE0_wgp == SE1_wgp`): `effective_CU == routed_CU`, linear in routed CU.
+- Imbalanced engines: the stronger engine is wasted down to the weaker one - a large
+  penalty, not a small one.
 
-Verified exact across a 12-config sweep (BC-250 fleet, 2026-07):
+Verified across a BC-250 fleet sweep (2026-07), including the permutations that separate
+this model from the earlier "two smallest arrays" one:
 
-| Per-array WGP | Routed CU | effective_CU | measured |
-|---|---|---|---|
-| 5 / 5 / 5 / 5 | 40 | 40 | optimal |
-| 4 / 4 / 4 / 4 | 32 | 32 | balanced, linear |
-| 5 / 5 / 5 / 1 | 32 | 24 | - |
-| 5 / 4 / 2 / 1 | 24 | 12 | - |
-| 5 / 5 / 1 / 1 | 24 | **8** | 357 GFLOPS ≈ 44 × 8 |
-| 4 / 2 / 1 / 1 | 16 | 8 | - |
+| Per-array WGP | Engines (WGP) | Routed CU | effective_CU | measured GFLOPS |
+|---|---|---|---|---|
+| 5 / 5 / 5 / 5 | 10 / 10 | 40 | 40 | 1746 |
+| 4 / 4 / 4 / 4 | 8 / 8 | 32 | 32 | balanced, linear |
+| 3 / 3 / 3 / 3 | 6 / 6 | 24 | 24 | 1057 |
+| 5 / 1 / 5 / 1 | 6 / 6 | 24 | **24** | **1058** |
+| 5 / 5 / 1 / 1 | 10 / 2 | 24 | **8** | **357** |
+| 5 / 4 / 2 / 1 | 9 / 3 | 24 | 12 | - |
+| 4 / 2 / 1 / 1 | 6 / 2 | 16 | 8 | - |
 
-So **balance beats count**: `4/4/4/4` (32 routed) delivers 32 effective CU; `5/5/1/1`
-(24 routed) collapses to 8. This supersedes the earlier "populated × shallowest-depth"
-and "linear in routed CU" models (both were balanced-only special cases).
+The decisive pair is `5/1/5/1` vs `5/5/1/1`: **same four arrays**, but `5/1/5/1` splits the
+two small arrays across engines (both engines 6 WGP -> 24 effective, 1058 GFLOPS) while
+`5/5/1/1` stacks them in SE1 (weaker engine 2 WGP -> 8 effective, 357 GFLOPS). A
+permutation-invariant "two smallest arrays" model predicts both at 8 and is wrong by 3×.
+So **engine balance beats count**, and *where* an array sits (which engine) is what
+matters, not its rank among the four. This supersedes the earlier "two smallest arrays",
+"populated × shallowest-depth", and "linear in routed CU" models - all were
+engine-balanced special cases.
 
 ### Memory-bound is different
 

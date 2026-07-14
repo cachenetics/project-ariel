@@ -1716,9 +1716,10 @@ fn cooling_cell(app: &ApuScreen, focused: bool) -> (&'static str, String, Color)
 
 fn draw_cu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     // Bench-driven view: the grid is the routing map (WGP on/off per shader
-    // array). The shape's effective CU follows the MEASURED two-smallest law
-    // (eff = 4 x sum of the two smallest per-array WGP counts — imbalance is
-    // EXPENSIVE, not a few percent); [b] measures the real GFLOPS.
+    // array). The shape's effective CU follows the MEASURED per-engine law
+    // (eff = 4 x min(SE0, SE1) WGP total — throughput tracks the weaker of the
+    // two engines, so engine imbalance is EXPENSIVE, not a few percent); [b]
+    // measures the real GFLOPS.
     let dim = Style::default().fg(DIM);
     let bd = |s: &str| Span::styled(s.to_string(), dim);
     let pending = app.cu_draft != app.cu_live;
@@ -1745,8 +1746,8 @@ fn draw_cu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     // ---- top: the real-math note ----
     f.render_widget(
         Paragraph::new(vec![
-            Line::from(bd(" GFLOPS ≈ 44 × eff-CU @1500 (eff=4×two-smallest WGP)")),
-            Line::from(bd(" balanced eff=routed; unequal gated · [b] measures")),
+            Line::from(bd(" GFLOPS ≈ 44 × eff-CU @1500 (eff=4×min(SE0,SE1) WGP)")),
+            Line::from(bd(" even engines eff=routed; skew gated · [b] measures")),
         ]),
         rows[0],
     );
