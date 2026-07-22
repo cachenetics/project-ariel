@@ -1011,28 +1011,59 @@ BOM-flexibility marking (two qualified part numbers for one socket), not a
 dual-chip layout.  Only shared power rails cross to TPMS1 (J4004 pin 1 ↔ TPMS1
 pin 15 = 3.3 V; J4004 pin 5 ↔ TPMS1 pin 12 = GND); no SPI signals bridge to TPMS1.
 
-Supported programmers: CH341A USB · Raspberry Pi 3 + flashrom · Raspberry Pi Pico 2
-running serprog (flashrom -p serprog:dev=/dev/ttyACM0,spispeed=16M).
-
 PSP-brick recovery — when a board fails POST (no display, no UART), external SPI
 reflash is the only known recovery; once the PSP rejects the SPI image, in-band
-reflash is impossible:
+reflash is impossible.  The programmer we document is a Raspberry Pi Pico 2 (RP2350)
+running pico-serprog (the libreboot serprog firmware): 3.3 V-native, no level shifter
+for this 3.3 V flash, and no external power needed for the target.
 
-┌─ PSP-BRICK RECOVERY PROCEDURE ───────────────────────────────────────────────────────┐
-│  1  Confirm 12 V present at the board input.                                         │
-│  2  Power the board OFF.                                                             │
-│  3  Connect the programmer to J4004 — power the programmer from its own USB.         │
-│  4  Sanity read:        flashrom -p ch341a_spi -r dump.bin                           │
-│  5  Write known-good:   flashrom -p ch341a_spi -w known-good.bin                     │
-│  6  Disconnect the programmer and cold-boot.                                         │
+Wire five lines — the four SPI signals plus a common ground — and DO NOT connect
+J4004 pin 1 (VCC).  The flash is powered by the board's own 3.3 V rail, so the Pico
+drives logic only.  Leaving VCC unconnected also means a mis-oriented connector can
+no longer short VCC ↔ GND, and it is what lets the same rig flash a live board.
+
+┌─ PICO 2 → J4004 WIRING (pico-serprog GPIO map) ──────────────────────────────────────┐
+│  Pico 2         Signal    J4004 pin    Flash SO-8                                    │
+│  GP2  (phys 4)  CLK        6            6                                            │
+│  GP3  (phys 5)  MOSI       7            5                                            │
+│  GP4  (phys 6)  MISO       3            2                                            │
+│  GP5  (phys 7)  CS#        2            1                                            │
+│  GND  (phys 3)  GND        5            4                                            │
+│  ---            VCC        1            LEAVE UNCONNECTED (board powers the flash)   │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-flashrom auto-detects the 16 MiB flash.  J4004 is PROGRAMMING-ONLY: during boot it
-carries the flash chip's MISO output but the SoC's MOSI commands are absent (the
-SoC reaches the flash over a separate internal SPI bus).  Serprog works because it
-drives the flash directly while the board is off / standby; J4004 cannot sniff or
-interpose on the live PSP-to-flash bus (a SOIC-8 clip on the chip's own pins is
-needed for that).  Recovery / backup with the board off is unaffected.
+Power state.  Because the Pico never sources VCC, there is no rail contention, so any
+of these work:
+
+  * PSU ON, board OFF (S5 standby) — the recommended default.  The 3.3VSB rail powers
+    the flash while the FCH SPI master is held in reset, so the Pico owns the bus
+    cleanly.  You do NOT need the board fully unplugged, and you do NOT supply 3.3 V
+    from the Pico.
+  * PSU ON, board BOOTED — also works.  Post-boot the FCH has shadowed the BIOS into
+    DRAM and leaves the ROM bus idle, so the Pico can drive it without a power-cycle.
+    Use this when cold-cycling is awkward; board-off is the more deterministic path.
+
+┌─ PICO 2 REFLASH PROCEDURE ───────────────────────────────────────────────────────────┐
+│  1  Flash pico-serprog.uf2 to the Pico 2 once (hold BOOTSEL, drag-drop the .uf2);    │
+│     it re-enumerates as a USB CDC serial port at /dev/ttyACM0.                       │
+│  2  Wire the five lines above.  Leave J4004 pin 1 (VCC) unconnected.                 │
+│  3  Leave the PSU on.  Board OFF (default) or booted — either is fine.               │
+│  4  Read twice and diff — the two dumps MUST match before you trust the backup:      │
+│        flashrom -p serprog:dev=/dev/ttyACM0,spispeed=16M -r dump1.bin                │
+│        flashrom -p serprog:dev=/dev/ttyACM0,spispeed=16M -r dump2.bin                │
+│        cmp dump1.bin dump2.bin                                                       │
+│  5  Write the known-good image:                                                      │
+│        flashrom -p serprog:dev=/dev/ttyACM0,spispeed=16M -w known-good.bin           │
+│  6  Disconnect the Pico and cold-boot.  If probe or verify fails, lower the clock    │
+│     (spispeed=4M) and retry — a marginal jumper wire shows up as a flaky probe.      │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+flashrom auto-detects the 16 MiB Winbond W25Q128JV.  The flash has a SINGLE SPI port —
+there is no "separate internal bus."  External access works because the Pico drives that
+one bus while the FCH master is either tri-stated (board off) or idle (booted).  The same
+electrical fact means J4004 CAN observe live PSP-to-flash traffic — passive sniffing just
+needs a tap firmware instead of serprog (see the recon pico2-spi-tap tooling), not a
+different header.
 
 ┌─ CAUTION — WRONG-CHIP FLASH ─────────────────────────────────────────────────────────┐
 │  Never flash the secondary Macronix MX25L4006E (the Super I/O ROM) — it bricks       │
