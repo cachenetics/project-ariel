@@ -1000,7 +1000,7 @@ part - recover by external SPI reflash of BIOS_A1 (below), not a CMOS pull.
 ── DEBUG & RECOVERY ─────────────────────────────────────────────── headers · jumpers ──
 
 The carrier exposes four headers and two jumpers for debug and recovery.  The most
-important is J4004, the SPI programming header — the only known recovery path from
+important is J4004, the SPI programming header - the only known recovery path from
 a PSP brick.
 
 ┌─ HEADERS & JUMPERS ──────────────────────────────────────────────────────────────────┐
@@ -1009,45 +1009,45 @@ a PSP brick.
 │  I2C_HEADER1   PMBus / I2C to VRM       SMBus-routed          read-only telemetry    │
 │  I2C_HEADER2   DDC / board identity     SMBus Bus 2           board ID · clock gen   │
 │  TPMS1         LPC / TPM                18-pin 2×9 · 2.0 mm   pin 13 keyed           │
-│  AUTO_PWRON1   jumper — 2-pin           CLRCMOS1              jumper — 2-pin         │
+│  AUTO_PWRON1   jumper - 2-pin           CLRCMOS1              jumper - 2-pin         │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
 J4004 breaks out the 16 MiB BIOS flash (BIOS_A1; typ. Winbond W25Q128JV).  The pin assignment is
-a CUSTOM ASROCK LAYOUT, not the conventional 8-pin programmer pinout — verified by
+a CUSTOM ASROCK LAYOUT, not the conventional 8-pin programmer pinout - verified by
 continuity to the SO-8 package.  A white triangle marks pin 1.
 
       top row    5   6   7   8
-      bot row    1   2   3  [4]          [4] = unpopulated pad — no through-hole pin
+      bot row    1   2   3  [4]          [4] = unpopulated pad - no through-hole pin
                  ^
                  white triangle = pin 1
 
-┌─ J4004 PINOUT — CUSTOM ASROCK LAYOUT ────────────────────────────────────────────────┐
+┌─ J4004 PINOUT - CUSTOM ASROCK LAYOUT ────────────────────────────────────────────────┐
 │  Pin        Flash SO-8   Signal      Notes                                           │
-│  1 (tri)    8            VCC 3.3 V   keyed pin — a reversed cable shorts VCC ↔ GND   │
-│  2          1            CS#         chip select — active low                        │
+│  1 (tri)    8            VCC 3.3 V   keyed pin - a reversed cable shorts VCC ↔ GND   │
+│  2          1            CS#         chip select - active low                        │
 │  3          2            MISO        data from flash                                 │
-│  4          —            —           unpopulated pad (no through-hole pin)           │
+│  4          -            -           unpopulated pad (no through-hole pin)           │
 │  5          4            GND         ground                                          │
 │  6          6            CLK         SPI clock                                       │
 │  7          5            MOSI        data to flash                                   │
-│  8          —            strap       DNP resistor, ~10k to GND — do not connect      │
+│  8          -            strap       do-not-populate pad, ~10k to GND - leave open   │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-WP# (SO-8 pin 3) and HOLD# (SO-8 pin 7) are NOT broken out — both are tied high via
+WP# (SO-8 pin 3) and HOLD# (SO-8 pin 7) are NOT broken out - both are tied high via
 on-board 10k pull-ups, so the flash is permanently out of write-protect / hold and
 an external programmer cannot exercise hardware write-protect through J4004.  The
-silkscreen shows both BIOS_A1 and BIOS_S_A1 on the single footprint — a
+silkscreen shows both BIOS_A1 and BIOS_S_A1 on the single footprint - a
 BOM-flexibility marking (two qualified part numbers for one socket), not a
 dual-chip layout.  Only shared power rails cross to TPMS1 (J4004 pin 1 ↔ TPMS1
 pin 15 = 3.3 V; J4004 pin 5 ↔ TPMS1 pin 12 = GND); no SPI signals bridge to TPMS1.
 
-PSP-brick recovery — when a board fails POST (no display, no UART), external SPI
+PSP-brick recovery - when a board fails POST (no display, no UART), external SPI
 reflash is the only known recovery; once the PSP rejects the SPI image, in-band
 reflash is impossible.  The programmer we document is a Raspberry Pi Pico 2 (RP2350)
 running pico-serprog (the libreboot serprog firmware): 3.3 V-native, no level shifter
 for this 3.3 V flash, and no external power needed for the target.
 
-Wire five lines — the four SPI signals plus a common ground — and DO NOT connect
+Wire five lines - the four SPI signals plus a common ground - and DO NOT connect
 J4004 pin 1 (VCC).  The flash is powered by the board's own 3.3 V rail, so the Pico
 drives logic only.  Leaving VCC unconnected also means a mis-oriented connector can
 no longer short VCC ↔ GND, and it is what lets the same rig flash a live board.
@@ -1065,11 +1065,11 @@ no longer short VCC ↔ GND, and it is what lets the same rig flash a live board
 Power state.  Because the Pico never sources VCC, there is no rail contention, so any
 of these work:
 
-  * PSU ON, board OFF (S5 standby) — the recommended default.  The 3.3VSB rail powers
+  * PSU ON, board OFF (S5 standby) - the recommended default.  The 3.3VSB rail powers
     the flash while the FCH SPI master is held in reset, so the Pico owns the bus
     cleanly.  You do NOT need the board fully unplugged, and you do NOT supply 3.3 V
     from the Pico.
-  * PSU ON, board BOOTED — also works.  Post-boot the FCH has shadowed the BIOS into
+  * PSU ON, board BOOTED - also works.  Post-boot the FCH has shadowed the BIOS into
     DRAM and leaves the ROM bus idle, so the Pico can drive it without a power-cycle.
     Use this when cold-cycling is awkward; board-off is the more deterministic path.
 
@@ -1077,26 +1077,25 @@ of these work:
 │  1  Flash pico-serprog.uf2 to the Pico 2 once (hold BOOTSEL, drag-drop the .uf2);    │
 │     it re-enumerates as a USB CDC serial port at /dev/ttyACM0.                       │
 │  2  Wire the five lines above.  Leave J4004 pin 1 (VCC) unconnected.                 │
-│  3  Leave the PSU on.  Board OFF (default) or booted — either is fine.               │
-│  4  Read twice and diff — the two dumps MUST match before you trust the backup:      │
+│  3  Leave the PSU on.  Board OFF (default) or booted - either is fine.               │
+│  4  Read twice and diff - the two dumps MUST match before you trust the backup:      │
 │        flashrom -p serprog:dev=/dev/ttyACM0,spispeed=16M -r dump1.bin                │
 │        flashrom -p serprog:dev=/dev/ttyACM0,spispeed=16M -r dump2.bin                │
 │        cmp dump1.bin dump2.bin                                                       │
 │  5  Write the known-good image:                                                      │
 │        flashrom -p serprog:dev=/dev/ttyACM0,spispeed=16M -w known-good.bin           │
 │  6  Disconnect the Pico and cold-boot.  If probe or verify fails, lower the clock    │
-│     (spispeed=4M) and retry — a marginal jumper wire shows up as a flaky probe.      │
+│     (spispeed=4M) and retry - a marginal jumper wire shows up as a flaky probe.      │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
 flashrom auto-detects a Winbond W25Q128JV cleanly, but OFTEN MIS-IDs the Macronix
 MX25L12872F BIOS variant - on a Macronix-populated board force the part with -c (see
-"reflashed a good image and still no POST" below), do not rely on auto-detect.  The
+"reflashed a good image and still no POST" below); do not rely on auto-detect.  The
 flash has a SINGLE SPI port - there is no "separate internal bus."  External access
-works because the Pico drives that
-one bus while the FCH master is either tri-stated (board off) or idle (booted).  The same
-electrical fact means J4004 CAN observe live PSP-to-flash traffic — passive sniffing just
-needs a tap firmware instead of serprog (see the recon pico2-spi-tap tooling), not a
-different header.
+works because the Pico drives that one bus while the FCH master is either tri-stated
+(board off) or idle (booted).  The same electrical fact means J4004 CAN observe live
+PSP-to-flash traffic - passive sniffing just needs a tap firmware instead of serprog
+(see the recon pico2-spi-tap tooling), not a different header.
 
 ┌─ CAUTION - PROGRAMMER VCC (CH341A undervolt / 5 V hazard) ───────────────────────────┐
 │  A stock CH341A drives VCC and the SPI lines at ~5 V and can damage a 3.3 V flash    │
@@ -1117,10 +1116,10 @@ different header.
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
 TPMS1 exposes the full LPC bus (LAD[3:0], LCLK, LFRAME#, LRESET#), SMBus, and
-power — the same LPC bus as the NCT6686D.  Confirmed LPC-only: no SPI signals
+power - the same LPC bus as the NCT6686D.  Confirmed LPC-only: no SPI signals
 bridge to the BIOS flash.
 
-┌─ TPMS1 PINOUT — 18-PIN · 2×9 · 2.0 mm ───────────────────────────────────────────────┐
+┌─ TPMS1 PINOUT - 18-PIN · 2×9 · 2.0 mm ───────────────────────────────────────────────┐
 │  pin  1  PCICLK                pin  2  GND                                           │
 │  pin  3  FRAME                 pin  4  SMB_CLK_MAIN                                  │
 │  pin  5  PCIRST#               pin  6  SMB_DATA_MAIN                                 │
@@ -1137,7 +1136,7 @@ halt / resume / single-step, register and memory access, breakpoints, and trace.
 It requires a 1.27 mm header soldered onto the pads.  TEST18 / TEST19 / DBRDY0 are
 left floating.
 
-┌─ J2 PINOUT — JTAG / HDT+ · 20-PIN · 1.27 mm · UNPOPULATED ───────────────────────────┐
+┌─ J2 PINOUT - JTAG / HDT+ · 20-PIN · 1.27 mm · UNPOPULATED ───────────────────────────┐
 │  pin  1  VDDIO                 pin  2  TCK                                           │
 │  pin  3  GND                   pin  4  TMS                                           │
 │  pin  5  GND                   pin  6  TDI                                           │
@@ -1226,10 +1225,10 @@ problem; still dead -> the fault is off-chip (rail or board), chase hardware.
 │  6  Isolation test       good image on a blank chip -> POST = chip/tool, dead = HW   │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-     See: SMBus / I2C topology — this chapter — Ch 3 · Security & Trust (PSP boot flash)
+     See: SMBus / I2C topology - this chapter - Ch 3 · Security & Trust (PSP boot flash)
 ```
 
-## ASRock Carrier Library — libAsrCore
+## ASRock Carrier Library - libAsrCore
 
 ```
 ── libAsrCore ──────────────────────────────────────────── v1.70.0 · board management ──
