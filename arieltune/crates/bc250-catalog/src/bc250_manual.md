@@ -137,8 +137,8 @@ ASRock BC-250 Carrier Board
 │   └── ISL99360 — smart power stages · inputs: PCIe 8-pin + Molex 8-pin
 │
 ├── SPI Flash
-│   ├── Winbond W25Q128JV — 16 MB (BIOS, PSP, SMU, ABL, APCB)
-│   └── Macronix MX25L4006E — 512 KB (Super I/O firmware)
+│   ├── BIOS_A1: 16 MB SPI (BIOS, PSP, SMU, ABL, APCB) - typ. Winbond W25Q128JV
+│   └── SIO1_R: 512 KB SPI (Super I/O firmware) - typ. Macronix MX25L4006E
 │
 └── Debug Headers
     ├── J2 — JTAG / HDT+ (20-pin, unpopulated)
@@ -402,7 +402,7 @@ board takes both a PCIe 8-pin and a Molex 8-pin input.
 ┌─ SUPER I/O ──────────────────────────────────────────────────────────────────────────┐
 │  Controller        Nuvoton NCT6686D — over LPC                                       │
 │  Functions         temps, voltage ADCs, fan PWM, watchdog                            │
-│  Firmware          own 512 KB flash — Macronix MX25L4006E                            │
+│  Firmware          own 512 KB SPI (SIO1_R) - typ. Macronix MX25L4006E                │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
                                             See: Chapter 1 → Storage, Network, Super I/O
@@ -414,7 +414,7 @@ board takes both a PCIe 8-pin and a Molex 8-pin input.
 ── FIRMWARE & CONFIGURATION ────────────────────────────────── SPI flash · boot chain ──
 
 ┌─ FIRMWARE STORE ─────────────────────────────────────────────────────────────────────┐
-│  SPI flash         Winbond W25Q128JV — 16 MB                                         │
+│  SPI flash         BIOS_A1 - 16 MB SPI (typ. Winbond W25Q128JV)                      │
 │  Contents          UEFI · PSP directory · SMU · ABL · APCB                           │
 │  BIOS              P3.00                                                             │
 │  VBIOS             113-AMDRBN-003                                                    │
@@ -468,8 +468,8 @@ not a standard platform.
 │  Super I/O        Nuvoton NCT6686D — EC-mode strapped                   HWM + UART2  │
 │  Storage          M.2 2280 — NVMe over FCH PCIe Gen2 x2                              │
 │  Network          Realtek RTL8111H Gigabit Ethernet                           r8169  │
-│  BIOS flash       Winbond W25Q128JV — 16 MiB SPI                                     │
-│  SIO flash        Macronix MX25L4006E — 512 KiB (NCT6686D firmware)          SIO1_R  │
+│  BIOS flash       BIOS_A1 - 16 MiB SPI (typ. Winbond W25Q128JV)                      │
+│  SIO flash        SIO1_R - 512 KiB SPI (NCT6686D fw; typ. Macronix MX25L4006E)       │
 │  Board mgmt       libAsrCore v1.70.0 — needs a detection shim on this board          │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
@@ -694,7 +694,7 @@ A Nuvoton NCT6686D hardware-monitor part, board-strapped into EC (Embedded
 Controller) mode at power-on — which permanently locks the traditional SuperIO
 index/data config path.  The hardware monitor and UART2 work; the watchdog / GPIO /
 PWM logical devices are gated behind the HWM page protocol and unreachable.  The
-chip runs its own firmware from a dedicated 512 KiB Macronix flash.
+chip runs its own firmware from a dedicated 512 KiB SPI flash (SIO1_R; typically Macronix).
 
 ┌─ SUPER I/O ──────────────────────────────────────────────────────────────────────────┐
 │  Part             Nuvoton NCT6686D                 chip ID 0xD441 · rev 0xBC · UIO1  │
@@ -703,7 +703,7 @@ chip runs its own firmware from a dedicated 512 KiB Macronix flash.
 │  SIO config       ports 0x2E / 0x2F — chip ID at reg 0x20/0x21                       │
 │                   LDN config regs locked — read 0xFF in EC mode                      │
 │  UART2            base 0x2F8 · IRQ 3                             ttyS1 · 115200 8N1  │
-│  SIO firmware     Macronix MX25L4006E — 512 KiB                              SIO1_R  │
+│  SIO firmware     SIO1_R - 512 KiB SPI (typ. Macronix MX25L4006E)                    │
 │  Access           root / CAP_SYS_RAWIO (raw I/O port access)                         │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
@@ -1012,7 +1012,7 @@ a PSP brick.
 │  AUTO_PWRON1   jumper — 2-pin           CLRCMOS1              jumper — 2-pin         │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-J4004 breaks out the Winbond W25Q128JV (16 MiB) BIOS flash.  The pin assignment is
+J4004 breaks out the 16 MiB BIOS flash (BIOS_A1; typ. Winbond W25Q128JV).  The pin assignment is
 a CUSTOM ASROCK LAYOUT, not the conventional 8-pin programmer pinout — verified by
 continuity to the SO-8 package.  A white triangle marks pin 1.
 
@@ -1452,13 +1452,13 @@ version 127.127.63 (all bits set) marks an unused or harvested slot.
 
                         AMD Oberon APU (Family 17h Model 47h)
  ┌───────────────┬────────────────┬───────────────┬─────────────────────┐
- │ COMPUTE / DMA │    MEMORY      │  INTERCONNECT │  POWER / CLK / THERM │
- │ GC  SDMA0/1   │ UMC×2  MMHUB   │ DF  NBIF IOHC │ MP1/SMU  SMUIO       │
- │               │ ATHUB SYSHUB   │ PCIE  PCS     │ THM  FUSE  CLKA/CLKB │
- │               │ HDP  L2IMU     │               │ OSSSYS/IH            │
+ │ COMPUTE / DMA │     MEMORY     │  INTERCONNECT │ POWER / CLK / THERM │
+ │ GC  SDMA0/1   │ UMC×2  MMHUB   │ DF  NBIF IOHC │ MP1/SMU  SMUIO      │
+ │               │ ATHUB SYSHUB   │ PCIE  PCS     │ THM  FUSE  CLKA/CLKB│
+ │               │ HDP  L2IMU     │               │ OSSSYS/IH           │
  ├───────────────┴────────────────┼───────────────┴─────────────────────┤
- │ SECURITY: MP0 / PSP (Cortex-A5)│ MEDIA/DISPLAY/IO: VCN(dead) DMU DIO  │
- │                                │ DAZ  ACP  USB×2  CCP  DBGU  DFX      │
+ │ SECURITY: MP0 / PSP (Cortex-A5)│ MEDIA/DISPLAY/IO: VCN(dead) DMU DIO │
+ │                                │ DAZ  ACP  USB×2  CCP  DBGU  DFX     │
  └────────────────────────────────┴─────────────────────────────────────┘
 
 Full enumeration — hw_id / IP version / instances / status:
@@ -1792,14 +1792,14 @@ Five mailbox queues, each a command/response/argument triple on SMN. Access via 
 indirect (PCI cfg 0xB8/0xBC on 0000:00:00.0) or BAR5 MMIO. The mailbox sits at the MP1
 base (0x16000 dwords = 0x58000 bytes from BAR5); BAR5 is physical 0xFE800000, 512 KiB.
 
-  x86 host                         MP1 / Xtensa LX SMU
+  x86 host                             MP1 / Xtensa LX SMU
  ┌─────────┐   write ARG (C2PMSG_82)   ┌────────────────────────┐
  │ driver  │ ────────────────────────► │ arg register           │
- │  or     │   write MSG (C2PMSG_66)   │  ↓ doorbell             │
+ │ or      │   write MSG (C2PMSG_66)   │  ↓ doorbell            │
  │ SMN/BAR5│ ────────────────────────► │ msg_dispatch (0x0DBC)  │
  │ window  │                           │  ↓ index fn-ptr table  │
- │         │   poll RSP (C2PMSG_90)     │  ↓ check capability    │
- │         │ ◄──────────────────────── │ handler → DPM/SMUIO/    │
+ │         │    poll RSP (C2PMSG_90)   │  ↓ check capability    │
+ │         │ ◄──────────────────────── │ handler → DPM/SMUIO/   │
  └─────────┘                           │           SVI2/PGFSM   │
                                        └────────────────────────┘
 
@@ -2783,8 +2783,8 @@ CP microcode jump-table sizes: MEC = 66,752 entries; ME/PFP/CE = 65,536. The VBI
 at boot from PSP-provided data and exposes it via the ACPI VFCT table; its hash is byte-
 identical across all factory BIOS versions.
 
-SPI flash layout — two SPI NOR chips: BIOS = Winbond W25Q128JVSQ (16 MiB, designator
-BIOS_A1, quad-capable); Super I/O = Macronix MX25L4006E (512 KiB, designator SIO1_R,
+SPI flash layout — two SPI NOR chips: BIOS = BIOS_A1 (16 MiB, quad-capable; typ.
+Winbond W25Q128JVSQ); Super I/O = SIO1_R (512 KiB; typ. Macronix MX25L4006E),
 feeds the NCT6686D — do not flash, no recovery). External programming via the populated
 2.54 mm J4004 SPI header.
 
@@ -3865,11 +3865,11 @@ HMAC-SHA-256 with a hardware-derived key).
 ```
 ── SPI FLASH · WRITE-PROTECT ─────────────────────────────── 16 MiB · no host-side WP ──
 
-The BIOS lives in a 16 MiB Winbond W25Q128JV SOIC-8 SPI flash.  There is no host-side
+The BIOS lives in the 16 MiB SOIC-8 SPI flash (BIOS_A1; typ. Winbond W25Q128JV).  There is no host-side
 write protection: the part is readable and writable from Linux with flashrom.
 
 ┌─ SPI FLASH ──────────────────────────────────────────────────────────────────────────┐
-│  Chip         Winbond W25Q128JVSQ (flashrom: W25Q128JV), SOIC-8                      │
+│  Chip         BIOS_A1 - 16 MiB SOIC-8 (typ. Winbond W25Q128JVSQ; flashrom W25Q128JV) │
 │  Capacity     16 MiB (16,777,216 bytes)                                              │
 │  Memory map   physical address 0xff000000                                            │
 │  Host WP      None (flashrom write+verify succeeds)                                  │
@@ -4113,7 +4113,7 @@ overrides on this hardware; Layer 3 is the safe, reversible surface.
 │                                 boot a snapshot.                                     │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-The 16 MB SPI image (Winbond W25Q128JV) splits into an AMD-PSP-signed region and
+The 16 MB SPI image (BIOS_A1; typ. Winbond W25Q128JV) splits into an AMD-PSP-signed region and
 an unsigned UEFI firmware volume, and this boundary governs what can be changed
 safely:
 
@@ -4128,7 +4128,7 @@ safely:
             │  UEFI BIOS FIRMWARE VOLUME      UNSIGNED — AMI internal CRC32    │
             │   Setup, CbsSetupDxe, …         only.  Safe to reflash + revert. │
             └──────────────────────────────────────────────────────────────────┘
-              Winbond W25Q128JV — 16 MB SPI flash
+              BIOS_A1 - 16 MB SPI flash (typ. Winbond W25Q128JV)
 
 ┌─ MODIFICATION SAFETY ────────────────────────────────────────────────────────────────┐
 │  $KDB key-store edits              FATAL — bricks the board                          │
