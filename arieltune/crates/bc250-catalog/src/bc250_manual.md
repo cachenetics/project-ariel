@@ -1108,6 +1108,32 @@ PSP-to-flash traffic - passive sniffing just needs a tap firmware instead of ser
 │  use the Pico 2 serprog rig above - 3.3 V-native, no 5 V hazard.                     │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
+┌─ SYMPTOM - CH341A 5 V OVER-VOLT BAD FLASH (dead 3.3 V mod / wrong jumper) ───────────┐
+│  A CH341A whose 3.3 V-mod regulator has FAILED - or a black-clip "3.3 V" unit left on│
+│  its 5 V jumper - drives VCC and the SPI lines at ~5 V while reporting nothing wrong:│
+│  the write completes and the tool's own verify PASSES, because the die still latches │
+│  data at 5 V.  The over-voltage lays down marginal / damaged cells, so the image the │
+│  PSP cold-reads back at 3.3 V is corrupt even though the programmer called it good.  │
+│  This is a BAD FLASH the tool will not admit to.                                     │
+│                                                                                      │
+│  Fingerprint on the next boot (this exact set = corrupt SPI image, not a dead board):│
+│    * bootloader red-LED DOUBLE-FLASH still runs   - earliest PSP stage executes      │
+│    * NIC powers up but its link LED STEADY-BLINKS  - PSP bootloops, no lease         │
+│    * NO display, NO USB keyboard enumerate         - x86 cores never leave reset     │
+│  The double-flash proves the PSP is alive: the board is stuck on a corrupt image -   │
+│  the same PSP-bootloop family as "no POST after a good reflash" below, but root-     │
+│  caused to the programmer over-volting the die, not to bad source bytes or a marginal│
+│  board rail.                                                                         │
+│                                                                                      │
+│  Fix: MEASURE the programmer's VCC pin BEFORE trusting any write - a DMM on the clip │
+│  MUST read 3.25-3.45 V; ~5 V means the 3.3 V mod is dead, do NOT flash with it.      │
+│  Rewrite the correct FULL 16 MiB image with a 3.3 V-native rig (the Pico 2 serprog   │
+│  above, or a bench 3.3 V on the VCC pin with the programmer's own VCC left off).  A  │
+│  die that was over-volted repeatedly may be degraded past reliable rewrite - if it   │
+│  will not take a clean image, socket a blank SPI128 and flash that (the isolation    │
+│  test below).                                                                        │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
 ┌─ CAUTION - WRONG-CHIP FLASH ─────────────────────────────────────────────────────────┐
 │  Never flash the 512 KiB Super I/O ROM (socket SIO1_R) - it bricks the NCT6686D      │
 │  permanently.  It is the 512 KiB chip whatever brand it wears (Macronix OR Winbond), │
@@ -1184,6 +1210,11 @@ produce exactly this, and they are separated by MEASUREMENT, not by flashing aga
        - partial image -> a BIOS-volume-only file leaves the PSP / APCB / EFI-NVRAM
          regions as the corrupted post-poke state.  A full image is EXACTLY
          16,777,216 bytes and carries the $PSP magic near 0x8E0000.
+       - programmer over-volt -> a CH341A whose 3.3 V mod has died (or a "3.3 V" unit
+         left on its 5 V jumper) writes at ~5 V and lays down marginal cells that pass
+         the tool's own verify but fail the PSP's cold read.  Measure the programmer VCC
+         pin (must be 3.25-3.45 V) before you trust ANY write - see the "CH341A 5 V
+         over-volt bad flash" symptom box under Debug & Recovery Headers.
      PROVE it: read the chip back (flashrom -r mine.bin), get a KNOWN-GOOD full 16 MiB
      dump from a working board, and compare the two files (sha256sum mine.bin good.bin -
      the hashes must match, or cmp mine.bin good.bin).  Compare to the good board's dump,
