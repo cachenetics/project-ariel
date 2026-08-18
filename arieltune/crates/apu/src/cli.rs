@@ -169,7 +169,13 @@ pub enum CuCmd {
     RouteSave,
     /// Apply the saved service-profile routing (used by the boot unit). An
     /// unsafe (empty-array) saved profile is refused and factory-24 applied.
-    RouteLoad,
+    RouteLoad {
+        /// Boot mode: verify the route actually took and retry until it does. The
+        /// umr write can silently no-op if the GPU is not ready right after boot,
+        /// so the boot unit uses this. Fails loudly (journal) if it never verifies.
+        #[arg(long)]
+        boot: bool,
+    },
     /// Un-arm the boot route re-apply (disable + remove arieltune-route.service).
     /// The saved route.json is kept; `cu route-save` re-arms.
     RouteForget,
@@ -604,8 +610,17 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
                 }
             );
         }
-        CuCmd::RouteLoad => {
-            let m = curoute::apply_saved()?;
+        CuCmd::RouteLoad { boot } => {
+            // Boot re-apply verifies the route took and retries (the GPU may not be
+            // ready in the first seconds after boot); a manual route-load applies once.
+            let m = if boot {
+                curoute::apply_saved_verified(
+                    BOOT_ROUTE_ATTEMPTS,
+                    std::time::Duration::from_secs(BOOT_ROUTE_DELAY_S),
+                )?
+            } else {
+                curoute::apply_saved()?
+            };
             println!(
                 "applied service routing: {:x?} ({} CU)",
                 m,
@@ -1620,6 +1635,11 @@ fn parse_masks(masks: &[String]) -> anyhow::Result<[u32; 4]> {
 
 /// Persist the just-applied CU routing so it survives reboots — snapshot the live
 /// masks to the profile + arm the boot re-apply service. Same as the TUI's apply.
+/// Boot route re-apply retry budget: up to ATTEMPTS tries, DELAY_S apart, so the
+/// route still lands if the GPU is not ready in the first seconds after boot.
+const BOOT_ROUTE_ATTEMPTS: u32 = 8;
+const BOOT_ROUTE_DELAY_S: u64 = 8;
+
 fn persist_route() -> bool {
     curoute::save_profile().is_ok() && persist::enable_route().is_ok()
 }

@@ -360,27 +360,85 @@ pub fn load_profile() -> Result<[u32; 4]> {
     Ok(p.masks)
 }
 
-/// Apply the saved service-profile routing. Returns the masks applied.
-///
-/// BOOT SAFETY: a saved profile with an empty shader array is REFUSED (compute
-/// on it wedges gfx1013) — the boot path falls back to the factory-24 route
-/// instead of enacting the unsafe shape, and logs the substitution.
-pub fn apply_saved() -> Result<[u32; 4]> {
-    let masks = load_profile()?;
+/// Resolve the saved profile to a safe target: the saved masks, or factory-24 if
+/// the saved profile is an unsafe empty-array shape. BOOT SAFETY: a saved profile
+/// with an empty shader array is REFUSED (compute on it wedges gfx1013); the boot
+/// path falls back to the factory-24 route and logs the substitution instead of
+/// enacting the unsafe shape.
+fn resolve_saved_target() -> Result<[u32; 4]> {
+    let mut masks = load_profile()?;
+    // Normalize to the WGP mask width so the target matches what apply() writes and
+    // current_masks() reads back; a legacy/hand-edited route.json with stray high bits
+    // would otherwise never verify (false FAILED) even when the route applied fine.
+    for m in &mut masks {
+        *m &= FULL_MASK;
+    }
     if has_empty_array(&masks) {
         eprintln!(
             "arieltune apu: saved route {masks:02x?} has an empty shader array (compute-wedge \
-             class) — refusing it; falling back to factory-24"
+             class), refusing it; falling back to factory-24"
         );
         crate::persist::log_transition(&format!(
             "route-load: unsafe empty-array profile {masks:02x?} refused -> factory-24"
         ));
-        let factory = [FACTORY_MASK; 4];
-        apply(factory)?;
-        return Ok(factory);
+        return Ok([FACTORY_MASK; 4]);
     }
-    apply(masks)?;
     Ok(masks)
+}
+
+/// Apply the saved service-profile routing once. Returns the masks applied.
+pub fn apply_saved() -> Result<[u32; 4]> {
+    let target = resolve_saved_target()?;
+    apply(target)?;
+    Ok(target)
+}
+
+/// Apply the saved routing and VERIFY it actually took, retrying up to `attempts`
+/// times (`delay` between tries). The boot re-apply service uses this: a fire-once
+/// route-load is unreliable because the umr write can silently no-op if the GPU is
+/// not ready yet just after boot, and a GPU reset can revert an applied route. Each
+/// try applies then reads the live masks back; success = live == target. If it never
+/// verifies, this returns an error so the boot unit reports FAILED in the journal
+/// instead of silently leaving the box on the kernel-default routing.
+pub fn apply_saved_verified(attempts: u32, delay: std::time::Duration) -> Result<[u32; 4]> {
+    let target = resolve_saved_target()?;
+    let attempts = attempts.max(1);
+    let mut detail = String::from("no attempt ran");
+    for attempt in 1..=attempts {
+        if let Err(e) = apply(target) {
+            detail = format!("apply error: {e}");
+            crate::persist::log_transition(&format!(
+                "route-load: attempt {attempt}/{attempts} apply failed: {e}"
+            ));
+        } else {
+            // Verification is SPI-mask based: current_masks() reads the per-array SPI
+            // dispatch masks, which is arieltune's definition of "the route". The CC
+            // harvest clear and RLC union are applied best-effort and not re-verified here.
+            match current_masks() {
+                Ok(live) if live == target => {
+                    crate::persist::log_transition(&format!(
+                        "route-load: verified {target:02x?} on attempt {attempt}/{attempts}"
+                    ));
+                    return Ok(target);
+                }
+                Ok(live) => {
+                    detail = format!("live reads {live:02x?}, wanted {target:02x?}");
+                    crate::persist::log_transition(&format!(
+                        "route-load: attempt {attempt}/{attempts} applied but {detail}, retrying"
+                    ));
+                }
+                Err(e) => detail = format!("readback error: {e}"),
+            }
+        }
+        if attempt < attempts {
+            std::thread::sleep(delay);
+        }
+    }
+    bail!(
+        "route {target:02x?} did not verify after {attempts} attempts ({detail}): the umr route \
+         write is not sticking (GPU not ready at boot, or a reset reverted it). Re-run \
+         `apu cu route-load` once the GPU is up, or check `journalctl -u arieltune-route.service`."
+    )
 }
 
 #[cfg(test)]

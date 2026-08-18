@@ -130,9 +130,16 @@ fn route_unit_text() -> String {
      [Service]\n\
      Type=oneshot\n\
      RemainAfterExit=yes\n\
-     # Boot-settle delay (see governor unit) before touching the SPI route.\n\
-     ExecStartPre=/usr/bin/sleep 60\n\
-     ExecStart=/usr/local/bin/arieltune apu cu route-load\n\
+     # The settle + verify-retry budget (sleep 30 + up to 8 tries x 8s + umr spawns)\n\
+     # can exceed systemd's default 90s start timeout, which would kill the unit mid-\n\
+     # retry and mark it failed before the budget is spent. Give it generous headroom.\n\
+     TimeoutStartSec=300\n\
+     # Short boot-settle before the first try; `route-load --boot` then verifies the\n\
+     # route actually took and retries (the GPU may not be ready in the first seconds\n\
+     # after boot, and the kernel default routing must be overridden). A failure here\n\
+     # is real (the route did not stick) and shows in `journalctl -u arieltune-route`.\n\
+     ExecStartPre=/usr/bin/sleep 30\n\
+     ExecStart=/usr/local/bin/arieltune apu cu route-load --boot\n\
      \n\
      [Install]\n\
      WantedBy=multi-user.target\n"
