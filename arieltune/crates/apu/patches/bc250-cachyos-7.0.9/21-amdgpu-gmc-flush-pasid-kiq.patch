@@ -1,0 +1,30 @@
+Disable the KIQ path for PASID TLB flushes on gfx1013.
+
+Without this the KIQ fence times out, the CP ends up in an unrecoverable
+state and the GPU reset fails to bring SDMA back:
+
+  amdgpu: timeout waiting for kiq fence
+  amdgpu: TLB flush failed for PASID 5
+  amdgpu: The cp might be in an unrecoverable state due to an
+          unsuccessful queues preemption
+  amdgpu: GPU reset begin!
+  amdgpu: [drm:amdgpu_ring_test_helper] *ERROR* ring sdma1 test failed (-110)
+  amdgpu: resume of IP block <sdma_v5_0> failed -110
+
+Verified by A/B on the same machine: stock module reproduces the above and
+wedges the GPU; patched module runs a full Stable Diffusion pipeline with
+zero errors. Reverting the patch reproduces the failure again.
+
+Original patch by neoney (BC-250 community). Independently verified here.
+
+--- a/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
+@@ -969,7 +969,7 @@ static int gmc_v10_0_hw_init(struct amdgpu_ip_block *ip_block)
+ 	struct amdgpu_device *adev = ip_block->adev;
+ 	int r;
+ 
+-	adev->gmc.flush_pasid_uses_kiq = !amdgpu_emu_mode;
++	adev->gmc.flush_pasid_uses_kiq = false; /* gfx1013/BC-250: KIQ TLB flush wedges */
+ 
+ 	/* The sequence of these two function calls matters.*/
+ 	gmc_v10_0_init_golden_registers(adev);

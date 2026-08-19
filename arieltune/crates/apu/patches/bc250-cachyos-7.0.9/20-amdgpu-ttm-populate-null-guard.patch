@@ -1,0 +1,30 @@
+Subject: [PATCH] drm/amdgpu: READ_ONCE NULL guard on the TTM *populate* path
+
+Completes the protection from patch 18 on the other half of the TTM lifecycle:
+amdgpu_ttm_tt_populate() dereferences ttm->pages[i]->mapping without checking
+for NULL. A BO whose page array has holes (partial population after an aborted
+GPU command) then dies with a kernel panic instead of an error. Guard each
+entry with READ_ONCE + return -ENOMEM.
+
+This is the exact form deployed in the build2 tree on blade 15
+(snapshot snap-8fe794e8), verified by diff against the running module's
+source tree.
+
+---
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
+@@ -1223,8 +1223,12 @@ static int amdgpu_ttm_tt_populate(struct ttm_device *bdev,
+ 	if (ret)
+ 		return ret;
+ 
+-	for (i = 0; i < ttm->num_pages; ++i)
+-		ttm->pages[i]->mapping = bdev->dev_mapping;
++	for (i = 0; i < ttm->num_pages; ++i) {
++		struct page *p = READ_ONCE(ttm->pages[i]);
++		if (unlikely(!p))
++			return -ENOMEM;
++		p->mapping = bdev->dev_mapping;
++	}
+ 
+ 	return 0;
+ }
