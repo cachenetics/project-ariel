@@ -22,10 +22,22 @@ use shell::Shell;
 #[command(
     name = "arieltune",
     version,
-    about = "BC-250 tuning suite (WIKI | BIOS | APU | MEM)"
+    about = "BC-250 tuning suite: WIKI (manual), BIOS (CBS/OEM Setup), APU (liberation+clocks), MEM (GDDR6 timings).",
+    long_about = "arieltune is the unified tuner for the ASRock BC-250 (Cyan Skillfish, gfx1013, PCI 1002:13FE).\n\
+        \n\
+        Tabs (each is also a CLI namespace): apu, mem, bios, wiki.\n\
+        Bare `arieltune` or `arieltune <tab>` opens the TUI; `arieltune <tab> <subcommand>` runs a CLI action.\n\
+        \n\
+        Safety model, common across tabs: most hardware-writing commands PREVIEW by default and only act\n\
+        with an explicit flag (--run for apu build/liberate, --write for mem/bios, --apply for oem-set,\n\
+        --arm for oem-stage). Writes to SMU clocks/CMOS/EFI/SPI flash need root and often a REBOOT.\n\
+        SMU rule: arieltune must be the ONLY actuator on the single MP1 mailbox; a second driver racing it\n\
+        cripples clocks or wedges the GPU. Agents: prefer --json where offered.\n\
+        \n\
+        Migrate/uninstall are suite-level and dry-run by default (need --apply)."
 )]
 struct Cli {
-    /// Open the TUI at this tab (wiki | bios | apu | mem). Overrides the config default.
+    /// Open the TUI at this tab: wiki, bios, apu, or mem. Overrides the config default_tab.
     #[arg(long, global = true)]
     tab: Option<String>,
 
@@ -37,46 +49,65 @@ struct Cli {
 enum Top {
     /// Launch the tabbed TUI (same as bare `arieltune`).
     Tui,
-    /// APU liberation + tuner (was `aputune`). No subcommand -> TUI at the APU tab.
+    /// APU tab: liberation, CU routing, GPU/CPU clocks and voltage. Bare `apu` opens the TUI tab.
+    ///
+    /// `arieltune apu <subcommand>` runs the CLI. Hardware writes need root; kernel/CU changes need a
+    /// REBOOT; gpu/cpu clock and voltage writes act live via the SMU. build/liberate PREVIEW by default
+    /// (--run to execute). SMU RULE: arieltune must be the ONLY actuator on the single MP1 mailbox; a
+    /// second SMU driver racing it cripples clocks or wedges the GPU.
     Apu {
         #[command(subcommand)]
         cmd: Option<apu::Cmd>,
     },
-    /// GDDR6 memory-timing tuner (was `memtune`). No subcommand -> TUI at the MEM tab.
+    /// MEM tab: GDDR6 memory-timing tuner. Bare `mem` opens the TUI tab.
+    ///
+    /// `arieltune mem <subcommand>` runs the CLI. Timing writes STAGE into CMOS and are trained by ABL
+    /// on the NEXT boot (not live). Previews unless --write (auto-backs-up first); needs root + /dev/port.
+    /// A bad config can fail to train, so keep a known-good backup and re-check the signature after reboot.
     Mem {
         #[command(subcommand)]
         cmd: Option<mem::Cmd>,
     },
-    /// BIOS / CBS surface (was `biostune`). No subcommand -> TUI at the BIOS tab.
+    /// BIOS tab: AMD CBS + OEM Setup surface. Bare `bios` opens the TUI tab.
+    ///
+    /// `arieltune bios <subcommand>` runs the CLI. Reads are safe; writes touch EFI vars / SPI flash /
+    /// NVRAM, apply on reboot, and are DANGEROUS (a wrong setting can fail to POST, needing a CMOS/NVRAM
+    /// clear or reflash). Previews by default (--write/--apply/--arm); needs root; gated to known firmware.
     Bios {
         #[command(flatten)]
         global: bios::Global,
         #[command(subcommand)]
         cmd: Option<bios::Cmd>,
     },
-    /// Knowledge manual (was `wikitune`). No subcommand -> TUI at the WIKI tab.
+    /// WIKI tab: the embedded BC-250 manual. Bare `wiki` opens the TUI tab.
+    ///
+    /// `arieltune wiki <subcommand>` reads the manual. Fully read-only; use --json or `export` for
+    /// machine-readable records (RAG ingestion / tooling).
     Wiki {
         #[command(subcommand)]
         cmd: Option<wiki::Cmd>,
     },
-    /// Migrate a box from the four standalone tools onto the suite (safe;
-    /// disables legacy aputune-* units, keeps per-app config). Dry-run by default.
+    /// Migrate a box from the four standalone tools onto the suite. Dry-run unless --apply.
+    ///
+    /// Safe: disables the legacy aputune-*/memtune/biostune units and keeps each app's config.
+    /// Preview only until --apply (which stops/disables units and creates the runtime dir; needs root).
     Migrate {
-        /// Actually stop/disable legacy units + create the runtime dir (needs root).
+        /// Actually stop/disable legacy units + create the runtime dir (needs root). Default: preview.
         #[arg(long)]
         apply: bool,
     },
-    /// Remove the suite: stop/disable all units, dkms-remove smiflash, remove the
-    /// binary + symlinks. Dry-run by default. `--revert-hw` restores stock hardware
-    /// first; `--purge` also deletes saved state. Needs root to actuate.
+    /// Remove the suite (units, smiflash DKMS module, binary, symlinks). Dry-run unless --apply.
+    ///
+    /// Preview only until --apply (needs root). --revert-hw restores stock hardware (releases GPU
+    /// clock/voltage, restores CPU) BEFORE removal; --purge also deletes saved state.
     Uninstall {
-        /// Actually perform the removal (otherwise dry-run).
+        /// Actually perform the removal. Default: preview only.
         #[arg(long)]
         apply: bool,
-        /// Also delete per-app state (/var/lib/{arieltune,aputune,memtune,biostune}).
+        /// Also delete per-app state (/var/lib/{arieltune,aputune,memtune,biostune}). DESTRUCTIVE.
         #[arg(long)]
         purge: bool,
-        /// Restore stock hardware (release GPU clock/voltage, restore CPU) first.
+        /// Restore stock hardware (release GPU clock/voltage, restore CPU) before removal.
         #[arg(long = "revert-hw")]
         revert_hw: bool,
     },

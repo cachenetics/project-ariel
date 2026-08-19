@@ -1,0 +1,68 @@
+Subject: [PATCH] drm/amdgpu: BC-250 — enable SDMA trap during gfx_resume
+
+amdgpu_fence_driver_hw_init() writes SDMAx_CNTL.TRAP_ENABLE only after
+amdgpu_device_ip_init() returns in full. Inside ip_init, TTM buffer ops
+already run on SDMA0 (buffer_funcs_ring) and wait on fences with the trap
+physically disabled, producing the two "Fence fallback timer expired on
+ring sdma0" lines (500 ms each) on every boot. Writing the bit in
+gfx_resume closes the window; a readback log proves the write landed
+(GabriWar docs/28: 4 consecutive boots, 2-3 lines -> zero).
+
+ON DISK / NOT APPLIED: cosmetic-perf boot fix, kept out of the applied
+series until it ships together with the SDMA firmware override (26).
+
+Adapted from GabriWar's bc250-sdma-trap-instrumentation.patch, minimal
+form (no IH dump, no IV trace counters).
+---
+
+diff --git a/var/tmp/ariel-sync/cachyos-7.0.9-1/drivers/gpu/drm/amd/amdgpu/sdma_v5_0.c b/var/tmp/ariel-sync/patchgen2/sdma_v5_027.c
+index e3a035c..17b1378 100644
+--- a/drivers/gpu/drm/amd/amdgpu/sdma_v5_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/sdma_v5_0.c
+@@ -54,6 +54,21 @@ MODULE_FIRMWARE("amdgpu/navi12_sdma1.bin");
+ MODULE_FIRMWARE("amdgpu/cyan_skillfish2_sdma.bin");
+ MODULE_FIRMWARE("amdgpu/cyan_skillfish2_sdma1.bin");
+ 
++#define BC250_PCI_DEVICE_ID 0x13FE
++
++/* BC-250: amdgpu_fence_driver_hw_init() only writes SDMAx_CNTL.TRAP_ENABLE
++ * after amdgpu_device_ip_init() returns in full - by then TTM buffer ops
++ * have already waited on SDMA0 fences with the trap physically off, and
++ * every boot logs two "Fence fallback timer expired on ring sdma0" lines
++ * (500 ms fallback each). Writing the bit during gfx_resume closes the
++ * window. Readback is printed, never the intended value, so an ignored
++ * write cannot masquerade as a fix. (GabriWar docs/28.)
++ */
++static int bc250_early_sdma_trap = 1;
++module_param(bc250_early_sdma_trap, int, 0444);
++MODULE_PARM_DESC(bc250_early_sdma_trap,
++	"BC-250: 1=write SDMAx_CNTL.TRAP_ENABLE already in gfx_resume (default 1)");
++
+ #define SDMA1_REG_OFFSET 0x600
+ #define SDMA0_HYP_DEC_REG_START 0x5880
+ #define SDMA0_HYP_DEC_REG_END 0x5893
+@@ -835,6 +850,24 @@ static int sdma_v5_0_gfx_resume_instance(struct amdgpu_device *adev, int i, bool
+ 		sdma_v5_0_enable(adev, true);
+ 	}
+ 
++	/* BC-250: enable the SDMA trap before the first fence is waited on.
++	 * Applies to both instances (loop over i) and only on bare metal.
++	 */
++	if (bc250_early_sdma_trap && !amdgpu_sriov_vf(adev) &&
++	    adev->pdev->device == BC250_PCI_DEVICE_ID) {
++		u32 reg = sdma_v5_0_get_reg_offset(adev, i, mmSDMA0_CNTL);
++		u32 antes = RREG32(reg);
++		u32 depois;
++
++		WREG32(reg, REG_SET_FIELD(antes, SDMA0_CNTL, TRAP_ENABLE, 1));
++		depois = RREG32(reg);
++		dev_info(adev->dev,
++			 "BC-250 sdma%d: SDMA0_CNTL antes=0x%08x depois=0x%08x TRAP_ENABLE=%lu\n",
++			 i, antes, depois,
++			 (depois & SDMA0_CNTL__TRAP_ENABLE_MASK) >>
++				SDMA0_CNTL__TRAP_ENABLE__SHIFT);
++	}
++
+ 	return amdgpu_ring_test_helper(ring);
+ }
+ 

@@ -61,6 +61,29 @@ pub const TEMP_MIN_C: u32 = 50;
 /// is enforced in SOFTWARE by the governor (which throttles the clock to hold it).
 pub const HW_TEMP_FLOOR_C: u32 = 95;
 
+// ---- 8-core CPU unlock (SMU-space core-presence mask) ----
+
+/// Core-presence mask register, SMU space (SMN 0x0115A870).
+/// Low byte: one bit per physical core. `0x77` = stock 6C/12T (cores 3 and 7
+/// masked); `0xFF` = all 8 cores / 16 threads. Writable only through the SMU
+/// q3 `WRITE_SMN` backdoor (which always writes 0xFF). Volatile: a warm reboot
+/// re-enumerates and preserves it; a cold boot reverts to 0x77.
+pub const CORE_MASK_REG: u32 = 0x0115_A870;
+/// Stock mask: 6 cores / 12 threads.
+pub const CORE_MASK_STOCK: u8 = 0x77;
+/// Full mask: 8 cores / 16 threads.
+pub const CORE_MASK_FULL: u8 = 0xFF;
+
+/// Outcome of an [`OcQ3::unlock_cores`] attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoreUnlock {
+    /// Mask already 0xFF — nothing was sent.
+    AlreadyUnlocked,
+    /// Sent msg 0x98 and verified the mask reads 0xFF. The new cores appear
+    /// after the next (warm) reboot — never reboot automatically.
+    Unlocked,
+}
+
 /// Queue-3 message ids (reverse-engineered).
 mod q3 {
     pub const TEST: u16 = 0x01;
@@ -80,6 +103,10 @@ mod q3 {
     pub const SET_GPU_MAX_TEMP: u16 = 0x8C;
     pub const SET_MAX_BOOST_CLK: u16 = 0x8F;
     pub const DISABLE_EXTRA_VOLTAGE: u16 = 0x9A;
+    /// Raw SMN-window write: the firmware writes a hardcoded 0xFF to the SMN
+    /// address in arg0. The BC-250 8-core CPU unlock rides this backdoor — it
+    /// is all-or-nothing (no value argument, no address validation).
+    pub const WRITE_SMN: u16 = 0x98;
 }
 
 /// The Vid CODE of the 1325 mV safety ceiling. Codes DECREASE as voltage rises
@@ -198,6 +225,69 @@ impl OcQ3 {
         Ok(())
     }
 
+    // ---- 8-core CPU unlock ----
+
+    /// Read the live core-presence mask (low byte of SMN 0x115A870), holding
+    /// the aperture lock so a concurrent writer cannot split the index/data
+    /// pair mid-read.
+    pub fn core_mask(&self) -> Result<u8> {
+        self.smn.lock();
+        let r = self.smn.rreg(CORE_MASK_REG).map_err(|e| {
+            anyhow::anyhow!("core-mask read: SMN I/O failed ({e})")
+        });
+        self.smn.unlock();
+        Ok((r? & 0xFF) as u8)
+    }
+
+    /// Unlock all 8 CPU cores via the q3 msg 0x98 backdoor.
+    ///
+    /// SAFETY: refuses any mask other than the known stock 0x77 (a board
+    /// already running an abnormal mask is never written — same rule as the
+    /// community DXE driver, to avoid lockout). The write itself is
+    /// all-or-nothing: the firmware always stores 0xFF. Success is verified by
+    /// re-reading the live register. Never reboots — the caller decides.
+    pub fn unlock_cores(&self) -> Result<CoreUnlock> {
+        let before = self.core_mask()?;
+        if before == CORE_MASK_FULL {
+            return Ok(CoreUnlock::AlreadyUnlocked);
+        }
+        if before != CORE_MASK_STOCK {
+            bail!(
+                "refusing: unexpected core mask 0x{before:02X} (expected 0x{CORE_MASK_STOCK:02X})"
+            );
+        }
+        self.unlock_write()
+    }
+
+    /// Forced unlock: identical to [`OcQ3::unlock_cores`] but skips the 0x77
+    /// gate for boards already running an abnormal mask (e.g. 0xD7).
+    ///
+    /// EXPERIMENTAL — use only on a board whose mask you have deliberately
+    /// decided to repair. The write is still the all-or-nothing q3 0x98
+    /// backdoor (firmware always stores 0xFF) and the result is still
+    /// readback-verified. A warm reboot re-enumerates; a cold boot reverts.
+    pub fn unlock_cores_any(&self) -> Result<CoreUnlock> {
+        let before = self.core_mask()?;
+        if before == CORE_MASK_FULL {
+            return Ok(CoreUnlock::AlreadyUnlocked);
+        }
+        self.unlock_write()
+    }
+
+    /// Shared write path: send the 0x98 backdoor and verify the mask reads
+    /// 0xFF afterwards.
+    fn unlock_write(&self) -> Result<CoreUnlock> {
+        let (st, _a) = self.send(q3::WRITE_SMN, CORE_MASK_REG, 0)?;
+        if st != SMU_OK {
+            bail!("q3 msg 0x98: status 0x{st:02x} — mask unchanged, nothing broken");
+        }
+        let after = self.core_mask()?;
+        if after != CORE_MASK_FULL {
+            bail!("unlock FAILED — mask read back 0x{after:02X}, nothing broken");
+        }
+        Ok(CoreUnlock::Unlocked)
+    }
+
     // ---- reads ----
 
     pub fn cpu_voltage_mv(&self) -> Result<u32> {
@@ -307,8 +397,10 @@ impl OcQ3 {
 }
 
 /// Physical core indices Linux reports present (unique topology core_id), sorted.
-/// The BC-250 has core_ids 0,1,2,4,5,6 (slots 3 & 7 fused off). Falls back to
-/// 0..6 if sysfs is unreadable.
+/// Stock BC-250s report core_ids 0,1,2,4,5,6 (slots 3 and 7 masked by the SMU
+/// core-presence mask); after the 8-core unlock they report 0..7. Derived live
+/// from sysfs so it tracks the unlock; falls back to 0..6 only when sysfs is
+/// unreadable.
 fn enabled_core_ids() -> Vec<u32> {
     let mut ids = std::collections::BTreeSet::new();
     if let Ok(rd) = std::fs::read_dir("/sys/devices/system/cpu") {

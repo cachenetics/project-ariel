@@ -1,0 +1,32 @@
+--- a/nct6687.c
++++ b/nct6687.c
+@@ -1644,12 +1644,24 @@
+ 			 * both ports resolve to the same EC base 0x0a20 and collide
+ 			 * on platform-device registration (nct6687.2592, -EEXIST).
+ 			 */
+-			if (val == 0xffff && sioaddr == 0x2e)
++			if (val == 0xffff)
+ 			{
+-				pr_warn("force=1: SIO chip-ID reads 0xffff (EC-firmware mode, e.g. ASRock BC-250); attaching as NCT6686D\n");
+-				sio_data->kind = nct6686;
+-				ec_forced = true;
+-				break;
++				if (sioaddr == 0x2e)
++				{
++					pr_warn("force=1: SIO chip-ID reads 0xffff (EC-firmware mode, e.g. ASRock BC-250); attaching as NCT6686D\n");
++					sio_data->kind = nct6686;
++					ec_forced = true;
++					break;
++				}
++				/*
++				 * Secondary SIO port (0x4e) is open bus on this
++				 * board — nothing present. Not a refusal and not an
++				 * error: the primary port (0x2e) may already have
++				 * attached successfully. Silently skip so the log
++				 * does not imply the driver failed to bind.
++				 */
++				pr_debug("force=1: port 0x%x chip-ID 0xffff (open bus, nothing present)\n", sioaddr);
++				goto fail;
+ 			}
+ 			/*
+ 			 * Only allow force=1 on chips whose ID is plausibly in the

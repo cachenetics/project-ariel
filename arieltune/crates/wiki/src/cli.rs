@@ -8,35 +8,36 @@ use anyhow::{Context, Result};
 use bc250_catalog::manual_data::{self, Block, Section};
 use clap::Subcommand;
 
+/// WIKI CLI: read the embedded BC-250 manual. All commands are read-only; --json where offered.
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// List chapters and their section counts.
+    /// List chapters and their section counts. Read-only.
     Chapters,
-    /// List sections (id + title), optionally within one chapter.
+    /// List sections (id + title), optionally within one chapter (--chapter N). Read-only.
     List {
         #[arg(long)]
         chapter: Option<u32>,
     },
-    /// Show one section by id -- readable text, or `--json` for the record.
+    /// Show one section by id: readable text, or --json for the structured record. Read-only.
     Get {
         id: String,
         #[arg(long)]
         json: bool,
     },
-    /// Full-text search across every section (title, tagline, prose, blocks).
+    /// Full-text search across every section (title, tagline, prose, blocks). --json for records. Read-only.
     Search {
         query: String,
         #[arg(long)]
         json: bool,
     },
-    /// List every safety CAUTION across the manual.
+    /// List every safety CAUTION across the manual. --json for records. Read-only.
     Safety {
         #[arg(long)]
         json: bool,
     },
-    /// Export sections as structured records for RAG ingestion or tooling.
+    /// Export sections as structured records for RAG ingestion or tooling. Read-only.
     Export {
-        /// `jsonl` (one record per line), `json` (one document), or `md`.
+        /// Output format: jsonl (one record per line), json (one document), or md.
         #[arg(long, default_value = "jsonl")]
         format: ExportFormat,
         #[arg(long)]
@@ -45,7 +46,7 @@ pub enum Cmd {
         #[arg(short, long)]
         out: Option<String>,
     },
-    /// Check that the embedded manual projects cleanly (ids, empty sections).
+    /// Check that the embedded manual projects cleanly (ids, empty sections). Read-only.
     Doctor,
 }
 
@@ -217,7 +218,7 @@ fn render_export(sel: &[&Section], fmt: ExportFormat) -> Result<String> {
         }
         ExportFormat::Json => serde_json::to_string_pretty(sel)?,
         ExportFormat::Markdown => {
-            let mut out = String::from("# ASRock BC-250 — OEM System Manual\n\n");
+            let mut out = String::from("# ASRock BC-250 OEM System Manual\n\n");
             for s in sel {
                 out.push_str(&format!("## {}\n\n", s.title));
                 if !s.tagline.is_empty() {

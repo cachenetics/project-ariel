@@ -9,10 +9,11 @@ Linux kernel driver:
     upstream commit cd735225a95e04dda3e2befd94ba77e1f7609dcc
     original author: Frederic Boltz
 
-That driver is licensed **GPL-2.0**, and this derivative subtree inherits
-GPL-2.0-only -- the same license (GPL-2.0-only) that covers the arieltune
-project at the repository top level. arieltune carries this subtree as an asset
-the way a package manager carries the patches it applies.
+That driver is GPL-2.0 (upstream SPDX), and this derivative subtree is
+GPL-2.0-only —
+the same license as this project (GPL-2.0-only, matching upstream
+cachenetics/project-ariel). Third-party attribution: see THIRD_PARTY_NOTICES at
+the repository root.
 
 The corresponding upstream source and this subtree's patch satisfy the GPL-2.0
 source-availability requirement for the shipped `prebuilt/*.ko` binary.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Build the liberation series into the system.
 //!
-//! aputune carries the 12-patch amdgpu series as data; this module reconstructs
+//! aputune carries the amdgpu liberation patch series as data; this module reconstructs
 //! a patched kernel package and installs it, following the validated flow:
 //!
 //!   1. materialize the embedded patches to the work dir
@@ -97,6 +97,8 @@ struct Step {
     cwd: PathBuf,
     /// Extra environment.
     env: Vec<(String, String)>,
+    /// Run as this uid (Some) or inherit the current one (None).
+    uid: Option<u32>,
 }
 
 fn step(desc: &str, cwd: &Path, argv: &[&str]) -> Step {
@@ -105,12 +107,18 @@ fn step(desc: &str, cwd: &Path, argv: &[&str]) -> Step {
         argv: argv.iter().map(|s| s.to_string()).collect(),
         cwd: cwd.to_path_buf(),
         env: vec![],
+        uid: None,
     }
 }
 
 impl Step {
     fn with_env(mut self, k: &str, v: &str) -> Self {
         self.env.push((k.into(), v.into()));
+        self
+    }
+
+    fn with_uid(mut self, uid: Option<u32>) -> Self {
+        self.uid = uid;
         self
     }
 
@@ -125,6 +133,10 @@ impl Step {
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
+        if let Some(uid) = self.uid {
+            use std::os::unix::process::CommandExt;
+            cmd.uid(uid);
+        }
         let status = cmd
             .status()
             .with_context(|| format!("spawn: {}", self.render()))?;
@@ -133,6 +145,47 @@ impl Step {
         }
         Ok(())
     }
+}
+
+/// Which uid the build steps must run as. makepkg refuses to run as root, and
+/// `arieltune` itself is root-only — so when invoked as root the build steps
+/// drop to the uid that owns the PKGBUILD dir (the user the package is meant
+/// to be built by). Non-root invocations inherit the current uid (None).
+fn drop_uid_for(euid: u32, owner_uid: u32) -> Option<u32> {
+    if euid == 0 && owner_uid != 0 {
+        Some(owner_uid)
+    } else {
+        None
+    }
+}
+
+fn resolve_drop_uid(pkgbuild: &Path) -> Result<Option<u32>> {
+    let euid = unsafe { libc::geteuid() };
+    let md = fs::metadata(pkgbuild)
+        .with_context(|| format!("stat {}", pkgbuild.display()))?;
+    use std::os::unix::fs::MetadataExt;
+    let owner = md.uid();
+    if euid == 0 && owner == 0 {
+        bail!(
+            "PKGBUILD dir {} is root-owned — makepkg refuses root; \
+             chown it to the build user and re-run",
+            pkgbuild.display()
+        );
+    }
+    Ok(drop_uid_for(euid, owner))
+}
+
+/// Recursively give a tree to the build uid (the materialized patches are
+/// written in-process as root; the build user must read them).
+fn chown_recursive(path: &Path, uid: u32) -> Result<()> {
+    use std::os::unix::fs::chown;
+    chown(path, Some(uid), None).with_context(|| format!("chown {}", path.display()))?;
+    if path.is_dir() {
+        for e in fs::read_dir(path).with_context(|| format!("read {}", path.display()))? {
+            chown_recursive(&e?.path(), uid)?;
+        }
+    }
+    Ok(())
 }
 
 /// Validate a `user@host` deploy target: both halves non-empty and limited to
@@ -317,18 +370,24 @@ fn extracted_src(pkgbuild: &Path) -> Result<PathBuf> {
 /// The extract step (makepkg -o). Integrity checks are NOT skipped: a kernel
 /// source that fails its checksums must stop the build, not get patched and
 /// installed anyway.
-fn extract_step(pkgbuild: &Path) -> Step {
+fn extract_step(pkgbuild: &Path, uid: Option<u32>) -> Step {
     step(
         "extract + prepare CachyOS source (makepkg -o)",
         pkgbuild,
         &["makepkg", "-o", "--nodeps", "--noconfirm"],
     )
+    .with_uid(uid)
 }
 
 /// Steps AFTER extraction: patch apply (argv `patch`, no shell), rebuild,
 /// install. `src` is the resolved extracted tree; for the preview (before
 /// extraction exists) a `src/cachyos-*` hint path stands in.
-fn post_extract_plan(opts: &BuildOpts, patch_dir: &Path, src: &Path) -> Result<Vec<Step>> {
+fn post_extract_plan(
+    opts: &BuildOpts,
+    patch_dir: &Path,
+    src: &Path,
+    uid: Option<u32>,
+) -> Result<Vec<Step>> {
     let pkgbuild = opts
         .pkgbuild_dir
         .clone()
@@ -357,6 +416,7 @@ fn post_extract_plan(opts: &BuildOpts, patch_dir: &Path, src: &Path) -> Result<V
             ],
             cwd: pkgbuild.clone(),
             env: vec![],
+            uid,
         });
     }
 
@@ -378,7 +438,8 @@ fn post_extract_plan(opts: &BuildOpts, patch_dir: &Path, src: &Path) -> Result<V
         .with_env("CC", &opts.cc)
         .with_env("HOSTCC", &opts.cc)
         .with_env("CXX", &opts.cc.replace("gcc", "g++"))
-        .with_env("HOSTCXX", &opts.cc.replace("gcc", "g++")),
+        .with_env("HOSTCXX", &opts.cc.replace("gcc", "g++"))
+        .with_uid(uid),
     );
 
     // 3. install + arm. Local vs remote. The shell lines glob the built
@@ -392,14 +453,14 @@ fn post_extract_plan(opts: &BuildOpts, patch_dir: &Path, src: &Path) -> Result<V
             "set -e; \
              scp {pb_q}/linux-cachyos-*.pkg.tar.zst {tgt}:/tmp/; \
              ssh {tgt} 'sudo pacman -U --noconfirm /tmp/linux-cachyos-*.pkg.tar.zst && \
-               printf \"options amdgpu bc250_cc_write_mode={mode}\\n\" | sudo tee /etc/modprobe.d/aputune-40cu.conf && \
+               printf \"options amdgpu bc250_cc_write_mode={mode}\\noptions amdgpu bc250_flush_by_runlist=1\\n\" | sudo tee /etc/modprobe.d/aputune-40cu.conf && \
                sudo mkinitcpio -P && sudo systemctl reboot'"
         )
     } else {
         format!(
             "set -e; \
              sudo pacman -U --noconfirm {pb_q}/linux-cachyos-*.pkg.tar.zst; \
-             printf 'options amdgpu bc250_cc_write_mode={mode}\\n' | sudo tee /etc/modprobe.d/aputune-40cu.conf; \
+             printf 'options amdgpu bc250_cc_write_mode={mode}\\noptions amdgpu bc250_flush_by_runlist=1\\n' | sudo tee /etc/modprobe.d/aputune-40cu.conf; \
              sudo mkinitcpio -P; \
              echo 'reboot to load the liberated kernel'"
         )
@@ -416,6 +477,10 @@ fn post_extract_plan(opts: &BuildOpts, patch_dir: &Path, src: &Path) -> Result<V
         argv: vec!["sh".into(), "-c".into(), install_sh],
         cwd: pkgbuild.clone(),
         env: vec![],
+        // The uid drop covers only the makepkg/patch steps (makepkg refuses
+        // root); install/arm stays root — pacman/mkinitcpio/reboot are sudo
+        // calls that must not run through the dropped, non-interactive uid.
+        uid: None,
     });
 
     Ok(steps)
@@ -434,23 +499,36 @@ pub fn build(opts: BuildOpts) -> Result<()> {
     if !pkgbuild.join("PKGBUILD").exists() {
         bail!("no PKGBUILD in {}", pkgbuild.display());
     }
-    fs::create_dir_all(&opts.work_dir)
-        .with_context(|| format!("mkdir {}", opts.work_dir.display()))?;
-    let patch_dir = materialize_patches(&opts.work_dir)?;
+    // makepkg refuses root, and arieltune is root-only: when invoked as root
+    // the build steps drop to the PKGBUILD dir's owner.
+    let drop_uid = resolve_drop_uid(&pkgbuild)?;
+    // A root HOME points at /root (0700) — the build user could not read the
+    // materialized patches there. Stage under /var/tmp instead.
+    let work_dir = if drop_uid.is_some() && opts.work_dir.starts_with("/root") {
+        PathBuf::from("/var/tmp/aputune-build")
+    } else {
+        opts.work_dir.clone()
+    };
+    fs::create_dir_all(&work_dir)
+        .with_context(|| format!("mkdir {}", work_dir.display()))?;
+    let patch_dir = materialize_patches(&work_dir)?;
+    if let Some(uid) = drop_uid {
+        chown_recursive(&work_dir, uid)?;
+    }
     println!(
         "materialized {} patches -> {}",
         patches::count(),
         patch_dir.display()
     );
 
-    let extract = extract_step(&pkgbuild);
+    let extract = extract_step(&pkgbuild, drop_uid);
 
     if !opts.run {
         // Preview: the source isn't extracted yet, so a `src/cachyos-*` hint
         // stands in for the tree the run resolves in Rust after extraction.
         let hint = pkgbuild.join("src/cachyos-<resolved-after-extract>");
         let mut steps = vec![extract];
-        steps.extend(post_extract_plan(&opts, &patch_dir, &hint)?);
+        steps.extend(post_extract_plan(&opts, &patch_dir, &hint, drop_uid)?);
         // A remote run ends with an in-Rust verification pass — show it in the
         // plan so the count and the last step aren't a surprise.
         let n = steps.len() + usize::from(opts.target.is_some());
@@ -488,7 +566,7 @@ pub fn build(opts: BuildOpts) -> Result<()> {
     println!("      $ {}", extract.render());
     extract.execute()?;
     let src = extracted_src(&pkgbuild)?;
-    let steps = post_extract_plan(&opts, &patch_dir, &src)?;
+    let steps = post_extract_plan(&opts, &patch_dir, &src, drop_uid)?;
     let n = steps.len() + 1;
     for (i, s) in steps.iter().enumerate() {
         println!("\n[{}/{}] {}", i + 2, n, s.desc);
@@ -548,13 +626,24 @@ mod tests {
     }
 
     #[test]
+    fn drop_uid_rules() {
+        // Root drops to the pkgbuild owner.
+        assert_eq!(drop_uid_for(0, 1000), Some(1000));
+        // A root-owned pkgbuild dir has nobody to drop to.
+        assert_eq!(drop_uid_for(0, 0), None);
+        // Non-root never changes uid.
+        assert_eq!(drop_uid_for(1000, 1000), None);
+        assert_eq!(drop_uid_for(1000, 0), None);
+    }
+
+    #[test]
     fn patch_steps_apply_with_zero_fuzz() {
         let opts = BuildOpts {
             pkgbuild_dir: Some(PathBuf::from("/tmp/pkg")),
             ..Default::default()
         };
         let steps =
-            post_extract_plan(&opts, Path::new("/tmp/patches"), Path::new("/tmp/src")).unwrap();
+            post_extract_plan(&opts, Path::new("/tmp/patches"), Path::new("/tmp/src"), None).unwrap();
         let patch_steps: Vec<_> = steps.iter().filter(|s| s.argv[0] == "patch").collect();
         assert_eq!(patch_steps.len(), patches::count());
         for s in patch_steps {
@@ -585,15 +674,18 @@ mod tests {
 
     #[test]
     fn doctor_json_parsing() {
+        let n = patches::count();
         let d = parse_doctor_json(
-            "{\"is_bc250\":true,\"kernel\":\"6.12.4-aputune\",\"present\":12,\
-             \"total\":12,\"fully\":true}\n",
+            &format!(
+                "{{\"is_bc250\":true,\"kernel\":\"6.12.4-aputune\",\"present\":{n},\
+                 \"total\":{n},\"fully\":true}}\n"
+            ),
         )
         .unwrap();
         assert!(d.is_bc250);
         assert_eq!(d.kernel, "6.12.4-aputune");
-        assert_eq!(d.present, 12);
-        assert_eq!(d.total, 12);
+        assert_eq!(d.present, n);
+        assert_eq!(d.total, n);
         assert!(d.fully);
         assert!(parse_doctor_json("not json").is_err());
         assert!(parse_doctor_json("").is_err());

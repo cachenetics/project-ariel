@@ -1,0 +1,63 @@
+Subject: [PATCH] drm/amdgpu: BC-250 — SDMA firmware override (module param)
+
+The cyan_skillfish2_sdma.bin firmware never drives the SDMA user queues:
+a 4 MiB copy completes 0 bytes and the completion signal never drops,
+while any other SDMA 5.0 blob (navi10 0x23, navi12 0x2c) copies the same
+4 MiB in 0.04 s with correct data, both engines (GabriWar docs/28+29,
+tools/sdma_copy_ab.py, tools/sdma_engine_ab.py, all n=3 deterministic).
+
+This patch lets the driver load a different blob on the BC-250 without
+touching /lib/firmware, gated by amdgpu.bc250_sdma_fw=<base> (e.g. navi12).
+Empty string = stock cyan_skillfish2 firmware. ON DISK / NOT APPLIED:
+keep off until the swap is validated on a blade with HSA_ENABLE_SDMA=1
+round trips; the plan is to retire patch 19 (bc250_skip_sdma0=1) after.
+
+By Gabriel Duarte Guerra (firmware finding); patch authored for arieltune.
+---
+
+diff --git a/var/tmp/ariel-sync/cachyos-7.0.9-1/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.c b/var/tmp/ariel-sync/patchgen2/amdgpu_sdma26.c
+index 321310b..fc7105f 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.c
+@@ -22,6 +22,7 @@
+  */
+ 
+ #include <linux/firmware.h>
++#include <linux/moduleparam.h>
+ #include "amdgpu.h"
+ #include "amdgpu_sdma.h"
+ #include "amdgpu_ras.h"
+@@ -33,6 +34,19 @@
+ /* SDMA CSA reside in the 3rd page of CSA */
+ #define AMDGPU_CSA_SDMA_OFFSET (4096 * 2)
+ 
++#define BC250_PCI_DEVICE_ID 0x13FE
++
++/* BC-250: the cyan_skillfish2 SDMA firmware never drives user queues
++ * (GabriWar docs/29: 0 bytes copied, completion signal never drops). Any
++ * other SDMA 5.0 blob works - navi10/navi12 copy 4 MiB in 0.04 s with
++ * correct data. Loading a different blob is gated behind this param so
++ * the swap is A/B-testable per boot. Empty string = stock cyan blob.
++ */
++static char bc250_sdma_fw[16] = "";
++module_param_string(bc250_sdma_fw, bc250_sdma_fw, sizeof(bc250_sdma_fw), 0644);
++MODULE_PARM_DESC(bc250_sdma_fw,
++	"BC-250: SDMA firmware base-name override (e.g. navi12); empty = stock cyan_skillfish2");
++
+ /*
+  * GPU SDMA IP block helpers function.
+  */
+@@ -212,6 +226,13 @@ int amdgpu_sdma_init_microcode(struct amdgpu_device *adev,
+ 	char ucode_prefix[30];
+ 
+ 	amdgpu_ucode_ip_version_decode(adev, SDMA0_HWIP, ucode_prefix, sizeof(ucode_prefix));
++	/* BC-250: swap the firmware the decoder picked. Applies to
++	 * every SDMA 5.0 instance on this device; navi12_sdma1.bin covers
++	 * instance 1 via the existing %s%d request below.
++	 */
++	if (bc250_sdma_fw[0] && adev->pdev->device == BC250_PCI_DEVICE_ID)
++		snprintf(ucode_prefix, sizeof(ucode_prefix), "%s_sdma",
++			 bc250_sdma_fw);
+ 	if (instance == 0)
+ 		err = amdgpu_ucode_request(adev, &adev->sdma.instance[instance].fw,
+ 					   AMDGPU_UCODE_REQUIRED,

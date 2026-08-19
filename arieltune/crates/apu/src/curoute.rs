@@ -396,10 +396,10 @@ pub fn apply_saved() -> Result<[u32; 4]> {
 /// Apply the saved routing and VERIFY it actually took, retrying up to `attempts`
 /// times (`delay` between tries). The boot re-apply service uses this: a fire-once
 /// route-load is unreliable because the umr write can silently no-op if the GPU is
-/// not ready yet just after boot, and a GPU reset can revert an applied route. Each
-/// try applies then reads the live masks back; success = live == target. If it never
-/// verifies, this returns an error so the boot unit reports FAILED in the journal
-/// instead of silently leaving the box on the kernel-default routing.
+/// not ready yet just after boot. Each try applies then reads the live masks back;
+/// success = live == target. If it never verifies, this returns an error so the
+/// boot unit reports FAILED in the journal instead of silently leaving the box on
+/// the kernel-default routing.
 pub fn apply_saved_verified(attempts: u32, delay: std::time::Duration) -> Result<[u32; 4]> {
     let target = resolve_saved_target()?;
     let attempts = attempts.max(1);
