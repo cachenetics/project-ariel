@@ -2,7 +2,7 @@
 //! The MEM CLI: the non-TUI surface of the BC-250 GDDR6 memory-timing tuner.
 //!
 //! Ported verbatim from memtune's `main.rs` (minus the process entrypoint and the
-//! `Tui` variant — the suite owns TUI launch). Every CMOS/timing safety path is
+//! `Tui` variant, the suite owns TUI launch). Every CMOS/timing safety path is
 //! preserved: writes stage into CMOS and take effect on the NEXT boot (ABL trains
 //! them); a re-stamp re-arms training without changing timings; dry-run unless
 //! `--write`; auto-backup before a write.
@@ -17,53 +17,62 @@ use clap::Subcommand;
 use crate::config::{signature_name, MemConf, FIELDS, SIG_ABL, SIG_LINUX_TOOL};
 use crate::{bench, cmos, config, sysmem, tune, umc};
 
+/// MEM CLI: tune BC-250 GDDR6 memory timings.
+///
+/// Timing writes STAGE into CMOS and are trained by ABL on the NEXT BOOT (they are not live). Writes
+/// need root and /dev/port (CONFIG_DEVPORT). Every write PREVIEWS by default and only commits with
+/// --write; a commit auto-backs-up the current config first. After a write, reboot, then `dump` and
+/// check the signature ($ABL = trained/good, CMOS_BAD = rejected). A bad config can fail to train;
+/// keep a known-good backup. No autotuning: change timings by hand, bench, and snap back if unstable.
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Print the current CMOS memory config.
+    /// Print the current CMOS memory config (clock, timings, signature, checksum). Read-only.
     Dump,
-    /// Stage the recommended tune (the known-good 1750 MHz config). Dry-run unless --write.
+    /// Stage the recommended known-good tune (1750 MHz). Previews unless --write. Root.
     Recommended {
-        /// Actually write to CMOS (applies on next reboot).
+        /// Actually write to CMOS. Applies on the next reboot (ABL trains it). Auto-backs-up first.
         #[arg(long)]
         write: bool,
     },
-    /// Stage individual timings as KEY=VAL. Dry-run unless --write.
+    /// Stage individual timings as KEY=VAL (range-checked). Previews unless --write. Root.
     Set {
         #[arg(required = true, value_name = "KEY=VAL")]
         assignments: Vec<String>,
+        /// Actually write to CMOS. Applies on the next reboot (ABL trains it). Auto-backs-up first.
         #[arg(long)]
         write: bool,
     },
-    /// Measure current memory bandwidth + latency (Vulkan).
+    /// Measure current memory bandwidth, random, latency, and integrity (Vulkan compute). Read-only.
     Bench,
-    /// Explain how the bandwidth + latency benchmark works.
+    /// Explain how the bandwidth / random / latency / integrity benchmark works. Read-only text.
     Explain,
-    /// Save the current CMOS config to a file (or an auto-named backup).
+    /// Save the current CMOS config to a file (or an auto-named backup). Read-only on hardware.
     Backup {
         #[arg(value_name = "FILE")]
         path: Option<String>,
     },
-    /// Restore a CMOS config from a backup file. Dry-run unless --write.
+    /// Restore a CMOS config from a backup file. Previews unless --write. Root.
     Restore {
         #[arg(value_name = "FILE")]
         path: String,
+        /// Actually write the restored config to CMOS. Applies on the next reboot.
         #[arg(long)]
         write: bool,
     },
-    /// Preflight checks: hardware, /dev/port, Vulkan, current config, serial.
+    /// Preflight checks: /dev/port access, BC-250 present, Vulkan, current config, serial console. Read-only.
     Doctor,
-    /// Read the live UMC (memory controller) registers (advanced; needs bc250_smu).
+    /// Dump the live UMC (memory controller) registers. Read-only; advanced; needs bc250_smu.
     Umc,
-    /// System-RAM integrity test (CPU-side) — catches corruption the GPU bench misses.
+    /// CPU-side system-RAM integrity test: catches corruption the GPU bench misses. Read-only (no writes).
     Memtest {
         /// Size of the test slab in MiB (default 2048).
         #[arg(long, default_value_t = 2048)]
         mb: usize,
-        /// Minimum seconds to run (more = more stress; default 30).
+        /// Minimum seconds to run; more = more stress (default 30).
         #[arg(long, default_value_t = 30)]
         secs: u64,
     },
-    // NOTE: memtune's `uninstall` verb is intentionally DROPPED here — uninstall
+    // NOTE: memtune's `uninstall` verb is intentionally DROPPED here, uninstall
     // is suite-level, see M7.
 }
 
@@ -95,12 +104,12 @@ fn memtest_cmd(mb: usize, secs: u64) -> Result<()> {
     let gibps = (r.bytes as f64 * r.passes as f64 * 3.0) / r.secs / 1e9; // ~3 buffer passes/iter
     if r.errors == 0 {
         println!(
-            "integrity    : OK — 0 errors over {} pass(es) of {mib} MiB in {:.0}s (~{gibps:.0} GB/s)",
+            "integrity    : OK, 0 errors over {} pass(es) of {mib} MiB in {:.0}s (~{gibps:.0} GB/s)",
             r.passes, r.secs
         );
     } else {
         println!(
-            "integrity    : {} ERRORS over {} pass(es) of {mib} MiB — this config is UNSTABLE (corrupts system RAM)",
+            "integrity    : {} ERRORS over {} pass(es) of {mib} MiB, this config is UNSTABLE (corrupts system RAM)",
             r.errors, r.passes
         );
     }
@@ -110,7 +119,7 @@ fn memtest_cmd(mb: usize, secs: u64) -> Result<()> {
 fn dump() -> Result<()> {
     let conf = MemConf::from_bytes(cmos::read_config()?);
     let sig = conf.signature();
-    println!("Signature  : 0x{:08X} — {}", sig, signature_name(sig));
+    println!("Signature  : 0x{:08X}, {}", sig, signature_name(sig));
     println!("             {}", config::signature_help(sig));
     let ck = conf.get("Checksum").unwrap_or(0) as u16;
     let ck_ok = if conf.checksum_valid() {
@@ -195,7 +204,7 @@ fn commit(current: MemConf, mut draft: MemConf, write: bool) -> Result<()> {
     }
     if changed == 0 {
         println!(
-            "timings already match; signature is {} — re-stamping so ABL trains it on reboot.",
+            "timings already match; signature is {}, re-stamping so ABL trains it on reboot.",
             signature_name(sig)
         );
     }
@@ -205,12 +214,12 @@ fn commit(current: MemConf, mut draft: MemConf, write: bool) -> Result<()> {
         } else {
             format!("{changed} change(s)")
         };
-        println!("\n{what} — dry run. Re-run with --write to commit (applies on reboot).");
+        println!("\n{what}, dry run. Re-run with --write to commit (applies on reboot).");
         return Ok(());
     }
     match cmos::auto_backup() {
         Ok(p) => println!("backed up current config -> {}", p.display()),
-        Err(e) => eprintln!("(auto-backup failed: {e} — continuing)"),
+        Err(e) => eprintln!("(auto-backup failed: {e}, continuing)"),
     }
     draft.stamp(SIG_LINUX_TOOL);
     cmos::write_config(&draft.buf)?;
@@ -219,12 +228,12 @@ fn commit(current: MemConf, mut draft: MemConf, write: bool) -> Result<()> {
 }
 
 const EXPLAIN: &str = "\
-arieltune mem — how the benchmark works
+arieltune mem: how the benchmark works
 
 BANDWIDTH (GB/s)
   A Vulkan compute kernel does a grid-stride READ over a large device-local
   GDDR6 buffer (256 MiB), repeated many times. The buffer is far bigger than the
-  GPU's L2, so re-reads hit GDDR6 — this measures real memory read bandwidth,
+  GPU's L2, so re-reads hit GDDR6, this measures real memory read bandwidth,
   not cache. Only one lane writes a result, so the traffic is ~pure read, and we
   take the best (fastest) dispatch and compute:
 
@@ -241,24 +250,24 @@ WARMUP (before every metric)
   the governor would hold the core at the mid step (1500 MHz) and every metric
   would read a clock low. So we first run a throttled stream of dispatches
   (~200/sec, like a real GPU workload) until the live clock confirms it reached
-  the top step — then bandwidth, random, and latency are all measured there. We
+  the top step, then bandwidth, random, and latency are all measured there. We
   never force the clock (forcing the absolute max overheats this board); the
   daemon keeps full thermal authority and we just give it the signal to climb.
 
 LATENCY (ns/access)
   A single GPU thread pointer-chases a random permutation: idx = next[idx], for
   ~1,000,000 dependent hops over an 8 MiB chain. Each read depends on the
-  previous one and the order is random, so the prefetcher can't hide it — the
+  previous one and the order is random, so the prefetcher can't hide it, the
   time per hop is the true dependent-access latency:
 
       ns/access = seconds / hops
 
 RANDOM (GB/s) and INTEGRITY are also measured: random is a scattered read (the
-timing-sensitive number — it's what responds to a tweak), and integrity writes a
+timing-sensitive number, it's what responds to a tweak), and integrity writes a
 pattern across 768 MiB and reads it back (0 errors = stable). Tune for random +
 latency; a config with integrity errors is not stable, don't keep it.
 
-All run via Vulkan compute (RADV) — no external tools.
+All run via Vulkan compute (RADV), no external tools.
 ";
 
 fn bench_cmd() -> Result<()> {
@@ -275,7 +284,7 @@ fn bench_cmd() -> Result<()> {
     );
     if r.random_gbps > 0.0 {
         println!(
-            "random       : {:.1} GB/s  (scattered read — the timing-sensitive number)",
+            "random       : {:.1} GB/s  (scattered read, the timing-sensitive number)",
             r.random_gbps
         );
     }
@@ -285,10 +294,10 @@ fn bench_cmd() -> Result<()> {
     if r.stability_bytes > 0 {
         let mib = r.stability_bytes / (1024 * 1024);
         if r.stability_errors == 0 {
-            println!("integrity    : OK — 0 errors over {mib} MiB written + verified");
+            println!("integrity    : OK, 0 errors over {mib} MiB written + verified");
         } else {
             println!(
-                "integrity    : {} ERRORS over {mib} MiB — this config is UNSTABLE",
+                "integrity    : {} ERRORS over {mib} MiB, this config is UNSTABLE",
                 r.stability_errors
             );
         }
@@ -332,7 +341,7 @@ fn is_bc250() -> bool {
 }
 
 fn doctor() -> Result<()> {
-    println!("arieltune mem doctor — preflight checks\n");
+    println!("arieltune mem doctor, preflight checks\n");
     let mut hard_fail = false;
 
     match std::fs::OpenOptions::new()
@@ -342,11 +351,11 @@ fn doctor() -> Result<()> {
     {
         Ok(_) => println!("  [ok]   /dev/port accessible (root + CONFIG_DEVPORT)"),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            println!("  [FAIL] /dev/port: permission denied — run with sudo");
+            println!("  [FAIL] /dev/port: permission denied, run with sudo");
             hard_fail = true;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("  [FAIL] /dev/port missing — kernel needs CONFIG_DEVPORT");
+            println!("  [FAIL] /dev/port missing, kernel needs CONFIG_DEVPORT");
             hard_fail = true;
         }
         Err(e) => {
@@ -358,13 +367,13 @@ fn doctor() -> Result<()> {
     if is_bc250() {
         println!("  [ok]   BC-250 GPU detected (1002:13FE, gfx1013)");
     } else {
-        println!("  [warn] no BC-250 (1002:13FE) found — this tool is BC-250-specific");
+        println!("  [warn] no BC-250 (1002:13FE) found, this tool is BC-250-specific");
     }
 
     if bench::vulkan_available() {
         println!("  [ok]   Vulkan device available (built-in benchmark)");
     } else {
-        println!("  [FAIL] no Vulkan device — can't run the benchmark");
+        println!("  [FAIL] no Vulkan device, can't run the benchmark");
         hard_fail = true;
     }
 
@@ -395,12 +404,12 @@ fn doctor() -> Result<()> {
     if cmdline.contains("console=ttyS") {
         println!("  [ok]   serial console configured (console=ttyS in cmdline)");
     } else {
-        println!("  [info] no serial console (console=ttyS) — handy for watching a risky reboot");
+        println!("  [info] no serial console (console=ttyS), handy for watching a risky reboot");
     }
 
     println!();
     if hard_fail {
-        bail!("not ready — fix the [FAIL] items above");
+        bail!("not ready, fix the [FAIL] items above");
     }
     println!("ready.");
     Ok(())

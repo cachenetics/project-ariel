@@ -45,11 +45,19 @@ pub fn force(mhz: u32) -> Result<ForceOutcome> {
     let mut cfg = dpm::PowerConfig::load_or_default();
     let mut vid_raised = None;
     if let Some((old, floor)) = required_vid_raise(&cfg, target) {
+        // Refuse loudly if overdrive is masked off — the write below would be
+        // inert and the clock must NOT move onto an undervolt sized lower.
+        telemetry::ensure_overdrive().map_err(|e| {
+            anyhow::anyhow!(
+                "cannot raise the persisted GPU undervolt {old} -> {floor} mV \
+                 (safe floor for {target} MHz): {e} — clock left UNCHANGED."
+            )
+        })?;
         if !telemetry::od_set_vddc(target, floor) {
             bail!(
                 "cannot raise the persisted GPU undervolt {old} -> {floor} mV (safe floor \
                  for {target} MHz): overdrive write failed — clock left UNCHANGED. \
-                 Fix overdrive (amdgpu.ppfeaturemask / root) or release the voltage first."
+                 Release the voltage first, or retry as root."
             );
         }
         vid_raised = Some((old, floor));
@@ -75,6 +83,10 @@ pub fn force(mhz: u32) -> Result<ForceOutcome> {
 /// PRESERVED auto mode (governor/autosleep/released stays whatever it was).
 pub fn unforce() -> Result<dpm::AutoMode> {
     let _lock = dpm::ConfigLock::acquire();
+    // Gate FIRST so the transition is all-or-nothing: if overdrive is masked
+    // off, returning early must not have touched live state or the persisted
+    // force config (otherwise the GPU unit would re-apply the pin on reboot).
+    telemetry::ensure_overdrive()?;
     Smu::open()?.unforce_gfx_freq()?;
     // Restore the stock voltage curve via amdgpu overdrive (SMU-safe).
     let _ = telemetry::od_reset();

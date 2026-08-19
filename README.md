@@ -46,7 +46,8 @@ own risk, on hardware you own.
 
 ## Licensing
 
-**GPL-2.0-only** for the entire project. The kernel-derived parts (the amdgpu liberation
-patch series and kernel modules, under `arieltune/`) were always GPL-2.0, inheriting the
-Linux kernel's license; the rest of the tree now matches. See `LICENSE` and the per-subtree
-NOTICE files under `arieltune/crates/` for upstream provenance and attribution.
+The whole project is **GPL-2.0-only**, matching upstream cachenetics/project-ariel.
+Kernel-derived parts (the amdgpu liberation patch series and kernel modules, under
+`arieltune/`) inherit the Linux kernel's GPL-2.0 — the same license, no conflict.
+Third-party attribution: see `THIRD_PARTY_NOTICES` and the per-subtree NOTICE files
+under `arieltune/crates/`.

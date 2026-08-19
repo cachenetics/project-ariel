@@ -18,9 +18,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-/// modprobe.d drop-in that persists the 40-CU liberation across reboots.
+/// modprobe.d drop-in that persists the 40-CU liberation and the runlist
+/// rebuild flush (patch 25) across reboots.
 pub const MODPROBE_CONF: &str = "/etc/modprobe.d/aputune-40cu.conf";
-const MODPROBE_LINE: &str = "options amdgpu bc250_cc_write_mode=3\n";
+const MODPROBE_LINE: &str =
+    "options amdgpu bc250_cc_write_mode=3\noptions amdgpu bc250_flush_by_runlist=1\n";
 
 const AMDGPU_INFO_DEV_INFO: u32 = 0x16;
 const DRM_IOCTL_BASE: u32 = 0x64; // 'd'
