@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BC-250 Liberation Project <bc250@invalid>
+Date: Sun, 6 Jul 2026 00:00:00 +0000
+Subject: [PATCH] drm/amdgpu: disable GFXOFF for Cyan Skillfish (gfx1013/IP 10.1.3)
+
+Layer 1 of the v3 three-layer protection. Prevents the GPU from entering the
+GFXOFF power-saving state, from which it cannot reliably wake. When the GPU is
+unresponsive, any MMIO register read hangs the CPU indefinitely on the BC-250's
+internal PCIe fabric (no completion timeout).
+
+Insert a gfx1013 case in gfx_v10_0_check_gfxoff_flag() that unconditionally
+masks out PP_GFXOFF_MASK. This runs early in hw_init, before any GFXOFF
+transition is attempted.
+
+Certified: 2026-06-14 — llama.cpp ROCm service, q4_0 KV cache, clean dmesg.
+
+Signed-off-by: BC-250 Liberation Project <bc250@invalid>
+---
+diff --git a/gfx_v10_0.c b/gfx_v10_0.c
+index fc65fb3..2d08d77 100644
+--- a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+@@ -4197,6 +4197,18 @@ static void gfx_v10_0_check_gfxoff_flag(struct amdgpu_device *adev)
+ 		if (!gfx_v10_0_navi10_gfxoff_should_enable(adev))
+ 			adev->pm.pp_feature &= ~PP_GFXOFF_MASK;
+ 		break;
++	/* ===== BC-250 v3 PATCH START ===== */
++	case IP_VERSION(10, 1, 3):
++		/*
++		 * BC-250 / Cyan Skillfish (gfx1013): GFXOFF causes the GPU to
++		 * enter a power-saving state from which it cannot reliably wake.
++		 * Unconditionally disable GFXOFF to prevent GPU hangs.
++		 */
++		adev->pm.pp_feature &= ~PP_GFXOFF_MASK;
++		dev_info(adev->dev,
++			 "BC-250: GFXOFF disabled to prevent GPU power-state hangs\n");
++		break;
++	/* ===== BC-250 v3 PATCH END ===== */
+ 	default:
+ 		break;
+ 	}
+-- 
+2.45.0

@@ -7,6 +7,13 @@
 //!   * fence_info ring sequence deltas — the activity signal (clock-independent)
 //!   * hwmon junction temperature — the thermal signal
 //!   * amdgpu_pm_info SoC watts — sanity / thermal-budget input (best-effort)
+//!
+//! ONE exception, TUI/CLI-only: [`gfxclk_mhz`] may fall through to the direct
+//! SMU QueryGfxclk read via the patch-11 debugfs node, which is serialized
+//! under amdgpu's own msg_ctl.lock (the same race-free surface `smu send_raw`
+//! uses). The daemon's control loop never calls it — its signals stay
+//! mailbox-free — and the fallback only fires when pp_dpm_sclk reports the
+//! 8-core metrics-table garbage.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -136,14 +143,15 @@ pub fn carrier_present() -> bool {
 }
 
 /// The prebuilt writable driver, embedded in the binary, and the exact kernel
-/// its vermagic matches. The BC-250 is x86-64-v3 but the CachyOS kernel headers
-/// ship x86-64-v4 host build tools (`fixdep` aborts with "CPU ISA level is lower
-/// than required"), so the module CANNOT be built on the board. aputune carries
-/// the prebuilt `.ko` and installs it itself. Source + patch + rebuild script:
+/// its vermagic matches. aputune carries the prebuilt `.ko` and installs it
+/// itself on a matching kernel (fresh blades with no nct6687 installed). The
+/// board CAN also rebuild it in place (its kernel is clang-built: use LLVM=1,
+/// see `kmod/nct6687-bc250/build-and-install.sh`), but the embedded copy keeps
+/// a clean blade fully autonomous. Source + patch + rebuild script:
 /// `kmod/nct6687-bc250/` — rebuild there for a different kernel.
 const NCT6687_KO: &[u8] =
-    include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.0.9-1-cachyos-bore.ko");
-const NCT6687_KVER: &str = "7.0.9-1-cachyos-bore";
+    include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.0.9-1-cachyos.ko");
+const NCT6687_KVER: &str = "7.0.9-1-cachyos";
 
 /// Running kernel release (`uname -r`).
 fn running_kver() -> String {
@@ -157,7 +165,8 @@ fn running_kver() -> String {
 /// if it isn't already resolvable by modprobe. Returns true if the module is
 /// available to load afterwards. When the running kernel doesn't match the
 /// prebuilt vermagic we return false rather than force-load a mismatched module
-/// (there's no way to rebuild on the board). Best-effort; needs root.
+/// (rebuild for the new kernel via `kmod/nct6687-bc250/build-and-install.sh`,
+/// which auto-passes LLVM=1 on clang-built kernels). Best-effort; needs root.
 fn install_writable_module() -> bool {
     let kver = running_kver();
     let dst = PathBuf::from(format!("/lib/modules/{kver}/updates/nct6687.ko"));
@@ -333,6 +342,34 @@ fn drm_device_dir() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Fail loudly when the overdrive interface is gated off. `pp_od_clk_voltage`
+/// only exists when PP_OVERDRIVE_MASK (bit 14, 0x4000) is set in
+/// `amdgpu.ppfeaturemask`; with the bit cleared every voltage write is inert.
+/// This has bitten us before (mask 0xfff73ef7 disables arieltune's own
+/// undervolt). This is a PREFLIGHT: mutating helpers that need a hard failure
+/// (with the corrected-mask hint) call it BEFORE touching live state, so the
+/// operation is all-or-nothing.
+pub fn ensure_overdrive() -> anyhow::Result<()> {
+    const PP_OVERDRIVE_MASK: u32 = 0x4000;
+    let mask_txt = fs::read_to_string("/sys/module/amdgpu/parameters/ppfeaturemask")
+        .map_err(|_| anyhow::anyhow!("amdgpu module not loaded (ppfeaturemask unreadable)"))?;
+    let mask = u32::from_str_radix(mask_txt.trim().trim_start_matches("0x"), 16)
+        .map_err(|_| anyhow::anyhow!("cannot parse amdgpu.ppfeaturemask: {mask_txt}"))?;
+    if mask & PP_OVERDRIVE_MASK == 0 {
+        anyhow::bail!(
+            "overdrive is disabled: PP_OVERDRIVE_MASK (bit 14, 0x4000) is cleared \
+             in amdgpu.ppfeaturemask (current 0x{mask:08x}), so pp_od_clk_voltage does not \
+             exist and every voltage write would be inert. Boot with \
+             amdgpu.ppfeaturemask=0x{:08x} (current | 0x4000).",
+            mask | PP_OVERDRIVE_MASK
+        );
+    }
+    if drm_device_dir().is_none() {
+        anyhow::bail!("pp_od_clk_voltage not found despite the overdrive mask — is amdgpu up?");
+    }
+    Ok(())
 }
 
 /// Live GFX rail voltage (mV) from amdgpu's hwmon `in0_input` (vddgfx) — the
@@ -547,6 +584,44 @@ pub fn current_sclk_mhz() -> Option<u32> {
         }
     }
     None
+}
+
+/// The lowest plausible GFX clock on this silicon (the low DPM state is 350).
+/// Values below it are the 8-core metrics-table garbage (C0Residency read as a
+/// clock) or a broken read — treat them as absent.
+pub const MIN_PLAUSIBLE_SCLK_MHZ: u32 = 350;
+
+/// Direct SMU QueryGfxclk (MHz) from the patch-11 telemetry node. Serialized
+/// under amdgpu's msg_ctl.lock, so it is race-free and — unlike every
+/// metrics-table path — immune to the 8-core hybrid layout.
+fn smu_gfxclk_mhz() -> Option<u32> {
+    let s = ariel_smu::smu::Smu::open().ok()?;
+    let txt = s.telemetry()?;
+    for line in txt.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("GfxClk:") else {
+            continue;
+        };
+        return rest.split_whitespace().next()?.parse().ok();
+    }
+    None
+}
+
+/// Current GFX clock (MHz), hardened for the 8-core CPU unlock:
+///
+/// * pp_dpm_sclk when it parses AND is plausible (>= 350 MHz) — plain sysfs,
+///   no MP1 mailbox traffic. Correct on 6-core and on 8-core WITH patch 28.
+/// * otherwise the direct SMU QueryGfxclk read (mailbox, serialized) — the
+///   only truthful source when the firmware redistributed the metrics table.
+///
+/// The SMU query is only reached in the pathological case, so the per-second
+/// gather loop stays mailbox-free on healthy systems.
+pub fn gfxclk_mhz() -> Option<u32> {
+    if let Some(sys) = current_sclk_mhz() {
+        if sys >= MIN_PLAUSIBLE_SCLK_MHZ {
+            return Some(sys);
+        }
+    }
+    smu_gfxclk_mhz()
 }
 
 #[cfg(test)]

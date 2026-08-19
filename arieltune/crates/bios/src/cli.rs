@@ -6,12 +6,12 @@
 //! tree. Current values are read from the live EFI variables; AmdSetup settings
 //! are editable (written back to the EFI variable, applied on reboot). OEM Setup
 //! settings are boot-service-only (the OS can't SetVariable them) AND often
-//! suppressed in the menu — but `oem-set` changes them anyway via SMM (no flash
+//! suppressed in the menu, but `oem-set` changes them anyway via SMM (no flash
 //! rig; see below).
 //!
 //! For a setting to actually take effect, AGESA needs its APCB *enable bit* set
 //! (the value lives in AmdSetup, the enable bit lives in the APCB in flash). The
-//! `apcb` commands read and flip those enable bits via in-system flashrom — the
+//! `apcb` commands read and flip those enable bits via in-system flashrom, the
 //! effective-write surface.
 //!
 //! OEM `Setup` is changed by `oem-set` through the `smiflash` SMM driver: it
@@ -20,7 +20,7 @@
 //! with no external programmer. Needs `smiflash.ko` loaded (smi_port=0xB0).
 //!
 //! Ported verbatim from biostune's `main.rs` (minus the process entrypoint and
-//! the `Tui` variant — the suite owns TUI launch). Every gate/force/dirty check
+//! the `Tui` variant, the suite owns TUI launch). Every gate/force/dirty check
 //! is preserved. Board detection is delegated to `bc250_board` (the lifted
 //! Compat/WriteClass/Gate).
 
@@ -38,85 +38,102 @@ use bc250_board::{Compat, WriteClass};
 /// The two global BIOS flags (flattened into `arieltune bios`).
 #[derive(Args)]
 pub struct Global {
-    /// For `apcb` commands: operate on a BIOS image file instead of the live SPI.
+    /// For `apcb` commands: operate on a BIOS image FILE instead of the live SPI flash (off-board, safe).
     #[arg(long, global = true, value_name = "FILE")]
     pub image: Option<String>,
 
-    /// Read current values from the SPI flash (slower) instead of efivarfs. This
-    /// recovers the OEM `Setup` values that efivarfs hides — so OEM settings show
-    /// their real current value, not the catalogue default.
+    /// Read current values from SPI flash (slower) instead of efivarfs.
+    ///
+    /// Recovers the OEM `Setup` values that efivarfs hides, so OEM settings show their real current
+    /// value rather than the catalogue default.
     #[arg(long = "from-flash", global = true)]
     pub from_flash: bool,
 }
 
+/// BIOS CLI: browse and edit the AMD CBS + OEM Setup surface of the BC-250.
+///
+/// Read paths are safe. Write paths need root, apply on REBOOT, and are DANGEROUS: a wrong setting can
+/// fail to POST and need a CMOS-clear/NVRAM-clear or reflash. Writes are gated to recognised ASRock
+/// BC-250 firmware (P2/P3/P5); an unknown BIOS or caution/brick/one-way setting needs --force.
+/// Two write mechanisms: `set` edits AmdSetup (CBS) via EFI SetVariable (NVRAM-clear recoverable);
+/// `oem-set` edits OEM Setup via the smiflash SMM driver (bypasses the variable lock, no flash rig).
+/// For a CBS setting to take effect, AGESA needs its APCB enable bit on (see `apcb`).
+/// All write commands PREVIEW by default (--write / --apply / --arm to commit).
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// List categories and how many settings each holds.
+    /// List setting categories and how many settings each holds. Read-only.
     Categories,
-    /// Print settings, optionally filtered by name or category (case-insensitive).
+    /// Print settings with their current values, optionally filtered by name or category. Read-only.
     Dump {
         #[arg(long)]
         filter: Option<String>,
     },
-    /// Show one setting: current value, options, default, category.
+    /// Show one setting: current value, options, default, category, storage. Read-only.
     Get { name: String },
-    /// Change settings as NAME=VAL (value or option label). Dry-run unless --write.
+    /// Change CBS settings (AmdSetup) as NAME=VAL. Previews unless --write. Applies on reboot. Root.
+    ///
+    /// VAL is a number, 0xHEX, or an option label. EFI SetVariable path (NVRAM-clear recoverable).
+    /// For OEM Setup settings use `oem-set` instead.
     Set {
         #[arg(required = true, value_name = "NAME=VAL")]
         assignments: Vec<String>,
-        /// Actually write to AmdSetup (applies on reboot).
+        /// Actually write to AmdSetup. Applies on reboot.
         #[arg(long)]
         write: bool,
-        /// Required for caution/brick/one-way settings or an unrecognised BIOS.
+        /// Required for caution/brick/one-way settings or an unrecognised BIOS. Bypasses the safety gate.
         #[arg(long)]
         force: bool,
     },
-    /// The APCB enable-bit layer — the *effective* surface. AGESA applies a CBS
-    /// setting only if its APCB token's enable bit is on (the value lives in
-    /// AmdSetup). Read with `status`; flip a token with `enable`/`disable`.
+    /// APCB enable-bit layer: the EFFECTIVE surface. AGESA applies a CBS setting only if its token bit is on.
+    ///
+    /// `status` reads the tokens; `enable`/`disable` flip one via in-system flashrom (brick-class flash
+    /// write). See `arieltune bios apcb --help`.
     Apcb {
         #[command(subcommand)]
         action: ApcbCmd,
     },
-    /// Stage a NO-FLASH OEM-Setup change as NAME=VAL, applied at the next boot
-    /// (boot-time setup_var; recoverable by NVRAM clear, no SPI rig). Dry-run
-    /// unless --arm. After it applies, run `oem-clear`.
+    /// Stage a no-flash OEM-Setup change as NAME=VAL applied at the next boot. Previews unless --arm. Root.
+    ///
+    /// SUPERSEDED and usually ineffective (firmware locks OEM Setup before the boot shell runs); prefer
+    /// `oem-set`. Recoverable by NVRAM clear, no SPI rig. After it applies, run `oem-clear`.
     OemStage {
         #[arg(required = true, value_name = "NAME=VAL")]
         assignments: Vec<String>,
-        /// Actually stage files + set the one-shot boot entry (then reboot yourself).
+        /// Actually stage the files + set the one-shot boot entry (then reboot yourself).
         #[arg(long)]
         arm: bool,
         /// Required for known-dangerous settings (e.g. IOMMU can black-screen the BC-250).
         #[arg(long)]
         force: bool,
     },
-    /// Tear down any staged one-shot OEM-Setup boot (clear BootNext + entry + files).
+    /// Tear down any staged one-shot OEM-Setup boot (clear BootNext + entry + files). Root.
     OemClear,
-    /// Change an OEM `Setup` value as NAME=VAL via SMM — no flash rig, bypasses the
-    /// variable lock (writes the NVAR store directly through the smiflash driver).
-    /// Dry-run unless --apply. Needs `smiflash.ko` loaded (smi_port=0xB0).
+    /// Change an OEM `Setup` value as NAME=VAL via SMM (no flash rig). Previews unless --apply. Root.
+    ///
+    /// Writes the NVAR store directly through the smiflash driver, bypassing the boot-service variable
+    /// lock. Applies on reboot. Needs `smiflash.ko` loaded (see `bios driver`). Recovery: NVRAM clear
+    /// or reflash the backup. DANGEROUS on caution settings (--force required).
     OemSet {
         /// One or more NAME=VAL (value or option label), OEM Setup settings only.
         assignments: Vec<String>,
-        /// Actually perform the SMM write (persists; applies on reboot).
+        /// Actually perform the SMM write. Persists; applies on reboot.
         #[arg(long)]
         apply: bool,
         /// Required for known-dangerous settings (e.g. IOMMU can black-screen the BC-250).
         #[arg(long)]
         force: bool,
     },
-    /// Environment + varstore checks.
+    /// Environment + varstore preflight: catalogue, board/BIOS compat, efivarfs, smiflash, dirty state. Read-only.
     Doctor,
-    /// Manage the smiflash SMM driver that powers OEM `Setup` editing.
+    /// Manage the smiflash SMM driver that powers OEM `Setup` editing (build / load / status / unload). Root.
     Driver {
         #[command(subcommand)]
         action: DriverCmd,
     },
-    /// Verify a field actually DOES something, via independent downstream
-    /// observables (topology / PCIe link / GPU power+clock / IOMMU / VRAM) —
-    /// not a variable read-back. Snapshot before a change, reboot, snapshot
-    /// after, then diff: a changed observable means the field is LIVE.
+    /// Prove a field actually DOES something via downstream observables, not a variable read-back. Read-only.
+    ///
+    /// Snapshot before a change, reboot, snapshot after, then diff: a changed observable (topology /
+    /// PCIe link / GPU power+clock / IOMMU / VRAM) means the field is LIVE. See `bios effect --help`.
     Effect {
         #[command(subcommand)]
         action: EffectCmd,
@@ -125,15 +142,16 @@ pub enum Cmd {
 
 #[derive(Subcommand)]
 pub enum EffectCmd {
-    /// Capture an observable fingerprint to a file (--out) or stdout.
+    /// Capture an observable fingerprint to a file (--out) or stdout. Read-only.
     Snapshot {
         #[arg(long, value_name = "FILE")]
         out: Option<String>,
     },
-    /// Diff two fingerprints; reports which observables changed (LIVE) or none (INERT).
+    /// Diff two fingerprints; report which observables changed (field is LIVE) or none (INERT). Read-only.
     Diff { a: String, b: String },
-    /// Sample GPU sclk/power/temp for N seconds and report the peak (drive a GPU
-    /// load in parallel — this is the dynamic observable for PPT/TDC/EDC).
+    /// Sample GPU sclk/power/temp for N seconds and report the peak. Read-only.
+    ///
+    /// Drive a GPU load in parallel: this is the dynamic observable for PPT/TDC/EDC fields.
     Gpu {
         #[arg(long, default_value_t = 15)]
         secs: u32,
@@ -142,37 +160,43 @@ pub enum EffectCmd {
 
 #[derive(Subcommand)]
 pub enum DriverCmd {
-    /// Build + install the smiflash module for THIS kernel via DKMS (rebuilds
-    /// automatically on kernel upgrades). Needs root, dkms, and kernel headers;
-    /// on a BC-250 it builds on the board.
+    /// Build + install the smiflash module for THIS kernel via DKMS. Root; needs dkms + kernel headers.
+    ///
+    /// DKMS rebuilds it automatically on kernel upgrades. On a BC-250 it builds on the board.
     Build,
-    /// Load the smiflash module with the FADT SW-SMI command port (auto-detected).
+    /// Load the smiflash module with the FADT SW-SMI command port (auto-detected). Root.
     Load,
-    /// Report whether the driver is loaded/installed + the detected SMI port.
+    /// Report whether the driver is loaded/installed and the detected SMI port. Read-only.
     Status,
-    /// Unload the driver.
+    /// Unload the smiflash driver. Root.
     Unload,
 }
 
 #[derive(Subcommand)]
 pub enum ApcbCmd {
-    /// List the APCB CBS tokens and whether each is enabled.
+    /// List the APCB CBS tokens and whether each enable bit is on. Read-only.
     Status,
-    /// Turn a CBS token's enable bit ON (id like 0x1501). Dry-run unless --write.
+    /// Turn a CBS token's enable bit ON (id like 0x1501). Previews unless --write. Root.
+    ///
+    /// --write flashes the APCB via in-system flashrom (brick-class) and needs a reboot. Backs up first.
     Enable {
         id: String,
+        /// Actually flash the enable bit. Applies at the next cold boot.
         #[arg(long)]
         write: bool,
-        /// Required to flash on an unrecognised BIOS (brick-class path).
+        /// Required to flash on an unrecognised BIOS (brick-class path). Bypasses the compat gate.
         #[arg(long)]
         force: bool,
     },
-    /// Turn a CBS token's enable bit OFF. Dry-run unless --write.
+    /// Turn a CBS token's enable bit OFF. Previews unless --write. Root.
+    ///
+    /// --write flashes the APCB via in-system flashrom (brick-class) and needs a reboot. Backs up first.
     Disable {
         id: String,
+        /// Actually flash the enable bit off. Applies at the next cold boot.
         #[arg(long)]
         write: bool,
-        /// Required to flash on an unrecognised BIOS (brick-class path).
+        /// Required to flash on an unrecognised BIOS (brick-class path). Bypasses the compat gate.
         #[arg(long)]
         force: bool,
     },
@@ -319,12 +343,12 @@ fn apcb_set_enable(
         if enable { "enabled" } else { "disabled" }
     );
     if tok.enabled() == enable {
-        println!("already in the requested state — nothing to do.");
+        println!("already in the requested state, nothing to do.");
         return Ok(());
     }
     a.set_token_enable(id, enable)?;
     if !write {
-        println!("\ndry-run — nothing flashed. Re-run with --write (then reboot).");
+        println!("\ndry-run, nothing flashed. Re-run with --write (then reboot).");
         return Ok(());
     }
     // Brick-class path (flashrom): gate on BIOS-version compatibility for a live
@@ -344,7 +368,7 @@ fn apcb_set_enable(
 fn value_str(efi: &EfiVars, s: &Setting) -> String {
     match efi.value(s) {
         Some(v) => format!("{} (0x{v:x})", s.label_for(v)),
-        None => "—".into(),
+        None => "-".into(),
     }
 }
 
@@ -437,7 +461,7 @@ fn resolve_oem(name: &str, val: &str) -> Result<(Setting, u8)> {
         .with_context(|| format!("unknown setting: {name}"))?;
     if s.varstore != "Setup" {
         bail!(
-            "{}: that's a CBS setting — use `set` (AmdSetup); oem-set is for OEM Setup",
+            "{}: that's a CBS setting, use `set` (AmdSetup); oem-set is for OEM Setup",
             s.name
         );
     }
@@ -455,11 +479,11 @@ fn resolve_oem(name: &str, val: &str) -> Result<(Setting, u8)> {
     Ok((s.clone(), v as u8))
 }
 
-/// Change OEM `Setup` values via SMM (NVAR-append) — no flash rig, bypasses the
+/// Change OEM `Setup` values via SMM (NVAR-append), no flash rig, bypasses the
 /// boot-service variable lock. Dry-run unless `apply`.
 fn oem_set_cmd(assignments: &[String], apply: bool, force: bool) -> Result<()> {
     if assignments.is_empty() {
-        bail!("nothing to set — give one or more NAME=VAL");
+        bail!("nothing to set, give one or more NAME=VAL");
     }
     let mut plan = Vec::new();
     for a in assignments {
@@ -469,7 +493,7 @@ fn oem_set_cmd(assignments: &[String], apply: bool, force: bool) -> Result<()> {
 
     let _ = smm::load(); // best-effort auto-load if the module is installed
     let smm = smm::Smm::open().context(
-        "OEM-set needs the smiflash SMM driver — run `arieltune bios driver build` \
+        "OEM-set needs the smiflash SMM driver, run `arieltune bios driver build` \
          (or `arieltune bios driver load`)",
     )?;
 
@@ -495,13 +519,13 @@ fn oem_set_cmd(assignments: &[String], apply: bool, force: bool) -> Result<()> {
 
     if !apply {
         println!(
-            "\ndry-run — nothing written. Re-run with --apply to perform the SMM write \
+            "\ndry-run, nothing written. Re-run with --apply to perform the SMM write \
              (persists; applies on reboot). Recovery if needed: NVRAM clear or reflash the backup."
         );
         return Ok(());
     }
 
-    // OEM-set is a flash-class SMM write at a catalogue offset — gate on the
+    // OEM-set is a flash-class SMM write at a catalogue offset, gate on the
     // BIOS version (offsets must match) and on each field's risk.
     let chosen: Vec<&Setting> = plan.iter().map(|(s, _)| s).collect();
     gate::preflight(
@@ -512,7 +536,7 @@ fn oem_set_cmd(assignments: &[String], apply: bool, force: bool) -> Result<()> {
     )?;
 
     println!(
-        "\napplying via SMM — all {} OEM field(s) in ONE NVAR entry...",
+        "\napplying via SMM, all {} OEM field(s) in ONE NVAR entry...",
         plan.len()
     );
     let edits: Vec<(usize, u8)> = plan.iter().map(|(s, v)| (s.offset, *v)).collect();
@@ -561,7 +585,7 @@ fn driver_cmd(action: DriverCmd) -> Result<()> {
         DriverCmd::Load => {
             smm::load().context("loading smiflash driver")?;
             let p = smm::smi_cmd_port().unwrap_or(0);
-            println!("smiflash loaded (smi_port=0x{p:x}) — OEM editing is now available.");
+            println!("smiflash loaded (smi_port=0x{p:x}), OEM editing is now available.");
             Ok(())
         }
         DriverCmd::Unload => {
@@ -613,7 +637,7 @@ fn set(assignments: &[String], write: bool, force: bool) -> Result<()> {
             .with_context(|| format!("unknown setting: {name}"))?;
         if !efivar::is_writable(&s.varstore) {
             anyhow::bail!(
-                "{}: OEM/boot-service var — use `oem-set {}=VAL` (SMM path), not `set`",
+                "{}: OEM/boot-service var, use `oem-set {}=VAL` (SMM path), not `set`",
                 s.name,
                 s.name,
             );
@@ -642,7 +666,7 @@ fn set(assignments: &[String], write: bool, force: bool) -> Result<()> {
         chosen.push(s);
     }
     if !write {
-        println!("\ndry-run — nothing written. Re-run with --write (then reboot to apply).");
+        println!("\ndry-run, nothing written. Re-run with --write (then reboot to apply).");
         return Ok(());
     }
     // AmdSetup is a firmware-native SetVariable (NVRAM-clear recoverable), but a
@@ -665,7 +689,7 @@ fn set(assignments: &[String], write: bool, force: bool) -> Result<()> {
 
 fn oem_stage(assignments: &[String], arm: bool, force: bool) -> Result<()> {
     eprintln!(
-        "note: `oem-stage` (boot-shell setup_var) is SUPERSEDED and usually INEFFECTIVE — the\n\
+        "note: `oem-stage` (boot-shell setup_var) is SUPERSEDED and usually INEFFECTIVE, the\n\
          \x20     firmware locks OEM `Setup` at EndOfDxe before the boot shell runs (verified on\n\
          \x20     P3.00). Use `oem-set NAME=VAL --apply` (the SMM path) instead.\n"
     );
@@ -682,7 +706,7 @@ fn oem_stage(assignments: &[String], arm: bool, force: bool) -> Result<()> {
             .with_context(|| format!("unknown setting: {name}"))?;
         if s.varstore != "Setup" {
             anyhow::bail!(
-                "{}: that's a CBS setting — use `set` (AmdSetup) for it; this path is for OEM Setup",
+                "{}: that's a CBS setting, use `set` (AmdSetup) for it; this path is for OEM Setup",
                 s.name
             );
         }
@@ -726,7 +750,7 @@ fn oem_stage(assignments: &[String], arm: bool, force: bool) -> Result<()> {
 
     if !arm {
         println!(
-            "dry-run — nothing staged. Re-run with --arm to stage files + set the one-shot boot."
+            "dry-run, nothing staged. Re-run with --arm to stage files + set the one-shot boot."
         );
         return Ok(());
     }
@@ -740,7 +764,7 @@ fn oem_stage(assignments: &[String], arm: bool, force: bool) -> Result<()> {
     boot::stage(&esp, &edits)?;
     let num = boot::arm(&esp)?;
     println!(
-        "\narmed one-shot boot Boot{num}. REBOOT to apply — it writes the setting at boot and resets \
+        "\narmed one-shot boot Boot{num}. REBOOT to apply, it writes the setting at boot and resets \
          back to Linux (no flash). If it doesn't return, power-cycle the board (BootNext is one-shot, \
          so it falls back to normal boot). After it applies, run `arieltune bios oem-clear`."
     );
@@ -771,7 +795,7 @@ fn doctor() -> Result<()> {
         }
     );
     println!(
-        "{} BIOS: {} ({}) — {}",
+        "{} BIOS: {} ({}), {}",
         match b.compat {
             Compat::Verified => "[ok]",
             Compat::ProbableAsrock => "[ok]",
@@ -807,7 +831,7 @@ fn doctor() -> Result<()> {
     if efi.has("Setup") {
         println!("[ok] Setup readable (OEM values)");
     } else {
-        println!("     note: Setup not exposed at runtime (boot-service-only on the BC-250) —");
+        println!("     note: Setup not exposed at runtime (boot-service-only on the BC-250) -");
         println!("           load smiflash.ko (below) for live OEM values + editing.");
     }
 
@@ -822,7 +846,7 @@ fn doctor() -> Result<()> {
             oem::oem_read(&s, "Setup", nvram::SETUP_SIZE, 0xDA).map_err(std::io::Error::other)
         }) {
             Ok((v, _)) => println!(
-                "     live OEM read OK — Above 4G Decoding = {}",
+                "     live OEM read OK, Above 4G Decoding = {}",
                 if v == 0 { "Disabled" } else { "Enabled" }
             ),
             Err(e) => println!("     [warn] driver present but SMM read failed: {e}"),
@@ -832,7 +856,7 @@ fn doctor() -> Result<()> {
     }
 
     if dirty::is_dirty() {
-        println!("[!!] NVRAM store is SMM-dirty — an OEM edit is pending a reboot.");
+        println!("[!!] NVRAM store is SMM-dirty, an OEM edit is pending a reboot.");
         println!("     REBOOT before changing any other setting (variable writes are blocked).");
     }
 

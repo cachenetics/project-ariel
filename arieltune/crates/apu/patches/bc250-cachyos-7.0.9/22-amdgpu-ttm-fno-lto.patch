@@ -1,0 +1,24 @@
+Subject: [PATCH] drm/amdgpu: build amdgpu_ttm.o with -fno-lto
+
+ThinLTO can prove ttm->pages[i] is never NULL across the call graph and elide
+the NULL guards from patches 18 and 20, bringing back the CR2=0x18 kernel
+panic. Build the one file with -fno-lto so the guards survive.
+
+Regenerated 2026-08-17 against linux-cachyos-bore-7.0.9 (previous copy was
+malformed). Note: the deployed build2 tree does NOT carry this flag — listed
+here because it is required for the guards to survive a ThinLTO build.
+
+---
+--- a/drivers/gpu/drm/amd/amdgpu/Makefile
++++ b/drivers/gpu/drm/amd/amdgpu/Makefile
+@@ -44,6 +44,10 @@ ccflags-y := -I$(FULL_AMD_PATH)/include/asic_reg \
+ subdir-ccflags-y += -Wno-override-init
+ subdir-ccflags-$(CONFIG_DRM_AMDGPU_WERROR) += -Werror
+ 
++# BC-250/gfx1013: prevent ThinLTO from eliding the NULL guard
++# in amdgpu_ttm_tt_unpopulate (patches 18 and 20).
++CFLAGS_amdgpu_ttm.o += -fno-lto
++
+ amdgpu-y := amdgpu_drv.o
+ 
+ # add KMS driver

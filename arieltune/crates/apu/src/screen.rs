@@ -74,9 +74,10 @@ enum Focus {
     Fan,
     Cu,
     Cpu,
+    Cores,
     Gpu,
 }
-const FOCUS_ORDER: [Focus; 4] = [Focus::Fan, Focus::Cpu, Focus::Gpu, Focus::Cu];
+const FOCUS_ORDER: [Focus; 5] = [Focus::Fan, Focus::Cpu, Focus::Cores, Focus::Gpu, Focus::Cu];
 
 /// The carrier fan channel that drives the main BC-250 cooler (the Pump-Fan
 /// header — pwm2/fan2 in sysfs). Verified: writing its duty moves the cooler.
@@ -115,6 +116,13 @@ struct Snapshot {
     /// OD_RANGE VDDC (min, max) mV — scales the vdd gauge without a per-frame
     /// sysfs read.
     od_range: (u32, u32),
+    /// 8-core CPU unlock state (firmware mask + visible cores). PCI-config SMN
+    /// reads only (independent aperture; no MP1 mailbox traffic), so a once-per
+    /// second gather is safe even while the GPU governor runs.
+    cores: Option<crate::cores::CoreSnapshot>,
+    /// Whether aputune-cores.service is installed (gathered once per second so
+    /// draw() stays fs-read-free).
+    cores_unit: bool,
 }
 
 /// Cheap data — sysfs/debugfs/DRM ioctl (+ one systemctl is-active), refreshed
@@ -138,7 +146,7 @@ fn gather() -> Snapshot {
         fully: rep.fully_patched(),
         present,
         total: patches::count(),
-        gfxclk: telemetry::current_sclk_mhz(),
+        gfxclk: telemetry::gfxclk_mhz(),
         temp: telemetry::junction_temp_c(),
         top_set: cfg.top_mhz,
         force_mhz: cfg.force_mhz,
@@ -154,6 +162,8 @@ fn gather() -> Snapshot {
         od_vddc: od.map(|(_, v)| v),
         od_sclk: od.map(|(s, _)| s),
         od_range: telemetry::od_vddc_range().unwrap_or((700, 1129)),
+        cores: crate::cores::snapshot().ok(),
+        cores_unit: std::path::Path::new(crate::cores::UNIT_PATH).exists(),
     }
 }
 
@@ -261,6 +271,19 @@ pub struct ApuScreen {
     /// The [p] liberation patch-detail popup; `None` = closed. While open it
     /// owns all keys (modal).
     patch_popup: Option<PatchPopup>,
+    /// Cores panel: selected core in the map + the advisory verify-sweep worker
+    /// (long-running, so it lives off the UI thread like the CU workers).
+    core_sel: usize,
+    /// OS-layer draft: None = no pending edit (the map shows live state);
+    /// Some = per-slot desired online state, applied only with [a]. Toggling
+    /// never writes hardware until [a]; [esc] discards; [r] resets all online.
+    core_draft: Option<[bool; 8]>,
+    cores_report: Option<Vec<String>>,
+    cores_verify_job: Option<JoinHandle<Result<Vec<String>>>>,
+    /// Two-step guard for the FORCED firmware unlock ([F]): the q3 0x98 write
+    /// is all-or-nothing and bypasses the 0x77 safety gate, so a warning popup
+    /// must be answered before anything is sent to the SMU.
+    core_force_confirm: bool,
 }
 
 /// SoC package power (W) from the amdgpu hwmon, if exposed. Filtered to the
@@ -421,6 +444,11 @@ impl ApuScreen {
             fan_target: None,
             armed_unforce: false,
             patch_popup: None,
+            core_sel: 0,
+            core_draft: None,
+            cores_report: None,
+            cores_verify_job: None,
+            core_force_confirm: false,
         }
     }
 
@@ -469,6 +497,24 @@ impl ApuScreen {
     fn tick_refresh(&mut self) {
         // M5: collect any finished GPU worker first (non-blocking).
         self.poll_cu_jobs();
+        // Collect the finished cores verify worker (non-blocking).
+        if let Some(job) = self.cores_verify_job.take() {
+            if job.is_finished() {
+                match job.join() {
+                    Ok(Ok(lines)) => {
+                        let verdict = lines.last().cloned().unwrap_or_default();
+                        self.cores_report = Some(lines);
+                        self.status = format!("cores verify done — {verdict}");
+                    }
+                    Ok(Err(e)) => {
+                        self.status = format!("cores verify failed: {e}");
+                    }
+                    Err(_) => self.status = "cores verify worker panicked".into(),
+                }
+            } else {
+                self.cores_verify_job = Some(job); // still running
+            }
+        }
         // Spawn an action armed on a PREVIOUS tick (status already shown) onto a
         // WORKER thread, so the multi-second KAT/bench never freezes the UI. Only
         // one GPU worker at a time (they share the process-wide compute lock).
@@ -698,10 +744,11 @@ impl Screen for ApuScreen {
         self.exit();
     }
 
-    /// The [p] patch popup and any in-progress field edit are modal sub-states:
-    /// while in one the shell must NOT steal global switch/quit keys.
+    /// The [p] patch popup, the [F] force-unlock confirm, and any in-progress
+    /// field edit are modal sub-states: while in one the shell must NOT steal
+    /// global switch/quit keys.
     fn modal(&self) -> bool {
-        self.patch_popup.is_some() || matches!(self.edit, Edit::Value(_))
+        self.patch_popup.is_some() || self.core_force_confirm || matches!(self.edit, Edit::Value(_))
     }
 
     fn status_hint(&self) -> Option<String> {
@@ -719,7 +766,7 @@ fn handle_key(app: &mut ApuScreen, key: KeyEvent) -> Outcome {
     let code = key.code;
     // While modal (popup open OR mid-edit) the pane owns every key — never leak
     // to the shell's global bindings.
-    let is_modal = app.patch_popup.is_some() || matches!(app.edit, Edit::Value(_));
+    let is_modal = app.patch_popup.is_some() || app.core_force_confirm || matches!(app.edit, Edit::Value(_));
     if !is_modal {
         // The shell's global keys reach it only via Ignored: modified keys
         // (Ctrl-Q quit, Ctrl-Tab cycle, Alt-1..4 jump), the function keys (F1-F4),
@@ -747,6 +794,28 @@ fn handle_key(app: &mut ApuScreen, key: KeyEvent) -> Outcome {
 /// popup, the global focus binds, and the focused panel. Every branch is
 /// pane-internal (the caller returns Consumed).
 fn dispatch_key(app: &mut ApuScreen, code: KeyCode) {
+    // Forced-unlock confirmation popup: while armed it owns EVERY key until
+    // answered — [y] writes, [esc]/[n] cancels, anything else is ignored.
+    if app.core_force_confirm {
+        match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                app.core_force_confirm = false;
+                app.status = match crate::cores::apply(false, true) {
+                    Ok(()) => {
+                        app.snap = gather();
+                        "FORCED UNLOCK OK — mask 0xFF written and verified; cores appear after a WARM reboot ([q] quit, then 'sudo systemctl reboot')".into()
+                    }
+                    Err(e) => format!("forced unlock FAILED: {e}"),
+                };
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                app.core_force_confirm = false;
+                app.status = "forced unlock cancelled — nothing was written".into();
+            }
+            _ => {}
+        }
+        return;
+    }
     // Modal patch popup: while open it owns EVERY key — nothing falls through
     // to the global or per-panel handlers, and [q] closes rather than quits.
     if app.patch_popup.is_some() {
@@ -802,6 +871,7 @@ fn dispatch_key(app: &mut ApuScreen, code: KeyCode) {
     match app.focus {
         Focus::Gpu => gpu_key(app, code),
         Focus::Cpu => cpu_key(app, code),
+        Focus::Cores => cores_key(app, code),
         Focus::Cu => cu_key(app, code),
         Focus::Fan => fan_key(app, code),
     }
@@ -1202,6 +1272,171 @@ fn cpu_key(app: &mut ApuScreen, code: KeyCode) {
     }
 }
 
+/// Live per-slot online flags for the draft baseline (slot = core id; a slot
+/// with no threads counts as offline).
+fn core_live_draft(app: &ApuScreen) -> [bool; 8] {
+    let mut d = [false; 8];
+    if let Some(cs) = &app.snap.cores {
+        for (core, cpus) in &cs.per_core {
+            if (*core as usize) < 8 && cpus.iter().any(|(_, on)| *on) {
+                d[*core as usize] = true;
+            }
+        }
+    }
+    d
+}
+
+/// Core Map panel keys — its own focus target (Tab reaches it between CPU and
+/// GPU). Left/Right (and [ ]) move the selected core. The OS-layer toggles are
+/// DRAFT-ONLY: space/o/O edit the draft, [a] applies it, [esc] cancels, [r]
+/// resets everything online. Nothing here writes hardware except [a], [r],
+/// [u] and [i].
+fn cores_key(app: &mut ApuScreen, code: KeyCode) {
+    match code {
+        KeyCode::Left | KeyCode::Char('[') => app.core_sel = (app.core_sel + 7) % 8,
+        KeyCode::Right | KeyCode::Char(']') => app.core_sel = (app.core_sel + 1) % 8,
+        KeyCode::Char(' ') => {
+            let sel = app.core_sel;
+            let live = core_live_draft(app);
+            let mut d = *app.core_draft.get_or_insert_with(|| live);
+            if sel == 0 && d[0] {
+                app.status = "core 0 cannot be offlined (kernel keeps cpu0)".into();
+                return;
+            }
+            d[sel] = !d[sel];
+            app.core_draft = Some(d);
+            app.status = format!("core {sel} toggled in draft — [a] apply, [esc] cancel");
+        }
+        KeyCode::Char('o') => {
+            let live = core_live_draft(app);
+            let mut d = *app.core_draft.get_or_insert_with(|| live);
+            for (i, v) in d.iter_mut().enumerate() {
+                if i != 0 {
+                    *v = false;
+                }
+            }
+            app.core_draft = Some(d);
+            app.status = "draft: all except core 0 offline — [a] apply".into();
+        }
+        KeyCode::Char('O') => {
+            let live = core_live_draft(app);
+            let mut d = *app.core_draft.get_or_insert_with(|| live);
+            for v in d.iter_mut() {
+                *v = true;
+            }
+            app.core_draft = Some(d);
+            app.status = "draft: all cores online — [a] apply".into();
+        }
+        KeyCode::Char('a') => {
+            let Some(draft) = app.core_draft.take() else {
+                app.status = "no draft to apply".into();
+                return;
+            };
+            let live = core_live_draft(app);
+            let mut changed = 0u32;
+            let mut err: Option<String> = None;
+            for slot in 0..8usize {
+                if draft[slot] == live[slot] {
+                    continue;
+                }
+                let r = if draft[slot] {
+                    crate::cores::online(Some(slot as u32))
+                } else {
+                    crate::cores::offline(Some(slot as u32))
+                };
+                match r {
+                    Ok(_) => changed += 1,
+                    Err(e) => {
+                        err = Some(format!("core {slot}: {e}"));
+                        break;
+                    }
+                }
+            }
+            app.snap = gather();
+            app.status = match err {
+                Some(e) => format!("apply stopped: {e}"),
+                None => format!("applied {changed} core change(s) (OS layer, instant)"),
+            };
+        }
+        KeyCode::Esc => {
+            if app.core_draft.is_some() {
+                app.core_draft = None;
+                app.status = "draft cancelled — nothing changed".into();
+            }
+        }
+        KeyCode::Char('r') => {
+            app.core_draft = None;
+            app.status = match crate::cores::online(None) {
+                Ok(()) => {
+                    app.snap = gather();
+                    "reset: all cores online (OS layer)".into()
+                }
+                Err(e) => format!("reset failed: {e}"),
+            };
+        }
+        KeyCode::Char('u') => match &app.snap.cores {
+            None => app.status = "core map unavailable (need root + BC-250)".into(),
+            Some(cs) => match cs.state {
+                crate::cores::CoreState::Locked => {
+                    app.status = match crate::cores::apply(false, false) {
+                        Ok(()) => "unlocked — cores appear after a WARM reboot".into(),
+                        Err(e) => format!("unlock refused: {e}"),
+                    };
+                    app.snap = gather();
+                }
+                crate::cores::CoreState::Unlocked => app.status = "already unlocked".into(),
+                crate::cores::CoreState::PendingReboot => {
+                    app.status = "mask set — warm reboot needed to enumerate".into()
+                }
+                crate::cores::CoreState::Abnormal(m) => {
+                    app.status = format!(
+                        "refusing: abnormal mask 0x{m:02X} — safe path only; [F] force-unlock (EXPERIMENTAL, with warning)"
+                    )
+                }
+            },
+        },
+        KeyCode::Char('F') => match &app.snap.cores {
+            None => app.status = "core map unavailable (need root + BC-250)".into(),
+            Some(cs) => match cs.state {
+                crate::cores::CoreState::Unlocked => app.status = "already unlocked".into(),
+                crate::cores::CoreState::PendingReboot => {
+                    app.status = "mask already 0xFF — warm reboot needed to enumerate".into()
+                }
+                crate::cores::CoreState::Locked => {
+                    // The safe [u] unlock exists for the known stock mask; the
+                    // forced hatch is only for boards the safe path refuses.
+                    app.status = "mask is stock 0x77 — use [u] for the safe unlock".into()
+                }
+                crate::cores::CoreState::Abnormal(_) => {
+                    app.core_force_confirm = true;
+                    app.status =
+                        "forced unlock armed — confirm [y] to write 0xFF, [esc] to cancel"
+                            .into();
+                }
+            },
+        },
+        KeyCode::Char('i') => {
+            app.status = match crate::cores::install() {
+                Ok(()) => {
+                    app.snap = gather();
+                    "cores boot unit installed (aputune-cores.service)".into()
+                }
+                Err(e) => format!("install failed: {e}"),
+            };
+        }
+        KeyCode::Char('v') => {
+            if app.cores_verify_job.is_none() {
+                app.cores_verify_job =
+                    Some(std::thread::spawn(|| crate::cores::sweep_lines(20)));
+                app.status = "verify sweep running (20s/core, advisory)…".into();
+            } else {
+                app.status = "verify already running".into();
+            }
+        }
+        _ => {}
+    }
+}
+
 fn cu_key(app: &mut ApuScreen, code: KeyCode) {
     match code {
         KeyCode::Left => app.cu_sel = app.cu_sel.saturating_sub(1),
@@ -1338,17 +1573,19 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
         .constraints([
             Constraint::Length(6),  // system card + carrier sensor row
             Constraint::Length(12), // CPU (controls + F/Vid curve | per-thread activity)
-            Constraint::Min(12),    // CU routing | GPU clock
+            Constraint::Length(9),  // core map (firmware mask + per-core OS state)
+            Constraint::Min(10),    // CU routing | GPU clock
         ])
         .split(root[1]);
 
     draw_system(f, body[0], app, app.focus == Focus::Fan);
     draw_cpu(f, body[1], app, app.focus == Focus::Cpu);
+    draw_cores(f, body[2], app, app.focus == Focus::Cores);
 
     let botrow = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(body[2]);
+        .split(body[3]);
     draw_gpu(f, botrow[0], app, app.focus == Focus::Gpu);
     draw_cu(f, botrow[1], app, app.focus == Focus::Cu);
 
@@ -1356,7 +1593,9 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
     // show the EDIT keys — most importantly [esc] cancel, so you can back out of
     // e.g. a `force` edit without committing a clock you didn't want.
     let editing = matches!(app.edit, Edit::Value(_));
-    let keys: &[(&str, &str)] = if app.patch_popup.is_some() {
+    let keys: &[(&str, &str)] = if app.core_force_confirm {
+        &[("[y]", "write 0xFF (forced)"), ("[esc]", "cancel")]
+    } else if app.patch_popup.is_some() {
         &[
             ("[up/dn]", "scroll"),
             ("[pgup/pgdn]", "page"),
@@ -1398,6 +1637,15 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
                 ("[tab]", "panel"),
                 ("[q]", "quit"),
             ],
+            Focus::Cores => &[
+                ("[←→]", "core"),
+                ("[space]", "toggle"),
+                ("[a]", "apply"),
+                ("[esc]", "cancel"),
+                ("[r]", "reset"),
+                ("[tab]", "panel"),
+                ("[q]", "quit"),
+            ],
             Focus::Gpu => &[
                 ("[↑↓]", "field"),
                 ("[enter]", "edit"),
@@ -1421,6 +1669,9 @@ fn draw(f: &mut Frame, area: Rect, app: &ApuScreen) {
     // Modal overlay LAST so it paints on top of every panel.
     if app.patch_popup.is_some() {
         draw_patch_popup(f, app);
+    }
+    if app.core_force_confirm {
+        draw_core_force_popup(f, app);
     }
 }
 
@@ -1460,7 +1711,7 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
     let intro = Style::default().fg(DIM);
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            " The curated 12-patch amdgpu series arieltune embeds and builds into",
+            format!(" The curated {}-patch amdgpu series arieltune embeds and builds into", patches::count()),
             intro,
         )),
         Line::from(Span::styled(
@@ -1495,7 +1746,11 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                p.title.to_string(),
+                if patches::OPTIONAL.contains(&p.id) {
+                    format!("{} (optional)", p.title)
+                } else {
+                    p.title.to_string()
+                },
                 Style::default().add_modifier(Modifier::BOLD),
             ),
         ]));
@@ -1512,7 +1767,117 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
         ]));
         lines.push(Line::from(""));
     }
+
+    if !patches::ON_DISK.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                " On disk, not applied ({}) — tracked here so the full patch\
+                 inventory is visible; `aputune build` does not apply them.",
+                patches::ON_DISK.len()
+            ),
+            Style::default()
+                .fg(ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(""));
+        for p in patches::ON_DISK {
+            let tell = match p.tell {
+                patches::Tell::ModParam(n) => format!("module param amdgpu.{n}"),
+                patches::Tell::Debugfs(n) => format!("debugfs node {n}"),
+                patches::Tell::SclkMax(m) => format!("pp_dpm_sclk >= {m} MHz"),
+                patches::Tell::CuCount(n) => format!(">= {n} active CUs"),
+                patches::Tell::Bundled => "none (superseded/shared)".into(),
+            };
+            lines.push(Line::from(vec![
+                Span::styled("  [od] ", Style::default().fg(DIM)),
+                Span::styled(
+                    p.title.to_string(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            for seg in wrap_words(p.desc, 64) {
+                lines.push(Line::from(Span::styled(format!("        {seg}"), intro)));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("        touches: ", intro),
+                Span::styled(p.touches.to_string(), Style::default().fg(ACCENT)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("        tell:    ", intro),
+                Span::raw(tell),
+            ]));
+            lines.push(Line::from(""));
+        }
+    }
     lines
+}
+
+/// The [F] modal: a centered warning explaining the forced unlock before the
+/// SMU write. Renders from live state only (the current mask) — no fs reads.
+fn draw_core_force_popup(f: &mut Frame, app: &ApuScreen) {
+    let mask = app.snap.cores.as_ref().map(|c| c.mask).unwrap_or(0);
+    let horiz = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(74)])
+        .flex(Flex::Center)
+        .split(f.area());
+    let rect = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(10)])
+        .flex(Flex::Center)
+        .split(horiz[0])[0];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(WARN))
+        .title(Span::styled(
+            " FORCED UNLOCK — EXPERIMENTAL ",
+            Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+        ));
+    let text = vec![
+        Line::from(vec![
+            Span::styled("Current mask ", Style::default().fg(DIM)),
+            Span::styled(
+                format!("0x{mask:02X}"),
+                Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " is NOT the known stock 0x77 — the safety gate",
+                Style::default().fg(DIM),
+            ),
+        ]),
+        Line::from("refuses it by design. The q3 0x98 write is all-or-nothing:"),
+        Line::from("it stores 0xFF (all 8 cores) regardless of the mask read."),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[y] write now  ",
+                Style::default().fg(GOOD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "cores appear after a WARM reboot; a cold boot",
+                Style::default().fg(DIM),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "    reverts to this board's own mask. Power/thermal envelope changes.",
+            Style::default().fg(DIM),
+        )),
+        Line::from(vec![
+            Span::styled(
+                "[esc] cancel  ",
+                Style::default().fg(WARN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "nothing is written.",
+                Style::default().fg(DIM),
+            ),
+        ]),
+    ];
+    let inner = block.inner(rect);
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+    f.render_widget(Paragraph::new(text), inner);
 }
 
 /// The [p] modal: a centered scrollable popup detailing every member of the
@@ -2113,7 +2478,7 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
         }
         curve.push(Line::from(spans));
     }
-    // ---- col 2 (right): per-thread activity (all 12) + per-core boost freq ----
+    // ---- col 2 (right): per-thread activity (all logical CPUs) + per-core boost freq ----
     let cell = |i: usize| -> Vec<Span<'static>> {
         let u = app.cpu_util.get(i).copied().unwrap_or(0);
         let col = if u >= 85 {
@@ -2139,17 +2504,25 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
         format!("{}{thead}", " ".repeat(hlead)),
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     ))];
-    // CPU0-5 left column, CPU6-11 right column (SMT sibling pairs are adjacent).
-    for row in 0..6usize {
+    // Left column = first half of logical CPUs, right = second half (SMT
+    // sibling pairs are adjacent). Sized from live topology so the grid
+    // follows the 6-core stock and the 8-core unlock.
+    let total = app.cpu_util.len().min(16);
+    let half = total.div_ceil(2);
+    for row in 0..half {
         let mut spans = cell(row);
         spans.push(Span::raw("  "));
-        spans.extend(cell(row + 6));
+        if row + half < total {
+            spans.extend(cell(row + half));
+        }
         right.push(Line::from(spans));
     }
     if let Some(l) = &app.cpu_live {
         if !l.cores.is_empty() {
             // Per-core boost freq, centered UNDER the thread grid (pad within its
             // width, not the whole column) so it lines up cleanly. Header labels it.
+            // No blank spacer line: at 8 cores the column is header + 8 rows +
+            // freq = exactly the available height, and a spacer would clip it.
             let freqs = l
                 .cores
                 .iter()
@@ -2157,7 +2530,6 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
                 .collect::<Vec<_>>()
                 .join(" ");
             let lead = GRID_W.saturating_sub(freqs.chars().count()) / 2;
-            right.push(Line::from(""));
             right.push(Line::from(Span::styled(
                 format!("{}{freqs}", " ".repeat(lead)),
                 Style::default().fg(GOOD),
@@ -2176,6 +2548,200 @@ fn draw_cpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
     f.render_widget(Paragraph::new(padded(left)), cols[0]);
     f.render_widget(Paragraph::new(padded(curve)), cols[1]);
     f.render_widget(Paragraph::new(padded(right)), cols[2]);
+}
+
+/// The 8-core CPU map — its own panel between the CPU panel and the GPU/CU row.
+/// Firmware mask bits and per-core OS-layer online state in a fixed 8-slot grid
+/// (the die always has 8 slots; masked ones show empty). Renders exclusively
+/// from the snapshot (draw stays fs-read-free) and uses only ██/·· glyphs
+/// (proven on the fleet terminals) plus reverse video for the selected cell.
+fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
+    let block = panel("Core Map", focused);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let Some(cs) = &app.snap.cores else {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " core map unavailable (need root + BC-250)",
+                Style::default().fg(DIM),
+            ))),
+            inner,
+        );
+        return;
+    };
+    let (state_style, note) = match cs.state {
+        crate::cores::CoreState::Unlocked => (Style::default().fg(GOOD), ""),
+        crate::cores::CoreState::Locked => (Style::default().fg(WARN), ""),
+        crate::cores::CoreState::PendingReboot => {
+            (Style::default().fg(WARN), " · warm reboot needed")
+        }
+        crate::cores::CoreState::Abnormal(_) => {
+            (Style::default().fg(BAD), " · writes refused")
+        }
+    };
+    let title = Line::from(vec![
+        Span::styled(
+            format!(" {} ", cs.state.label()),
+            state_style.add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "mask 0x{:02X} · {}C/{}T · {} offline{}",
+                cs.mask, cs.cores, cs.threads, cs.offline, note
+            ),
+            Style::default().fg(DIM),
+        ),
+        Span::styled(
+            if app.snap.cores_unit {
+                ""
+            } else {
+                " · unit not installed"
+            },
+            Style::default().fg(WARN),
+        ),
+        Span::styled(
+            if app.core_draft.is_some() {
+                " · draft [a] apply [esc] cancel"
+            } else {
+                ""
+            },
+            Style::default().fg(WARN),
+        ),
+    ]);
+
+    let keys = Line::from(Span::styled(
+        " keys: [←→] select · [space] toggle · [a] apply · [esc] cancel · [r] reset · [u] unlock · [F] force-unlock · [i] unit · [v] verify",
+        Style::default().fg(DIM),
+    ));
+    // The last line carries the verify verdict while a sweep report exists
+    // (the keys legend returns once it is dismissed/overwritten).
+    let last = app
+        .cores_report
+        .as_ref()
+        .and_then(|l| l.last())
+        .map(|v| Line::from(Span::styled(format!(" verify: {v}"), Style::default().fg(WARN))))
+        .unwrap_or_else(|| keys.clone());
+
+    // Per-core thread glyphs: both threads -> ██, mixed -> █·, none -> ··.
+    let thread_pair = |core: u32| -> (&'static str, Color) {
+        let cpus = cs
+            .per_core
+            .iter()
+            .find(|(c, _)| *c == core)
+            .map(|(_, v)| v.as_slice());
+        let on = |i: usize| cpus.and_then(|v| v.get(i)).map(|(_, on)| *on).unwrap_or(false);
+        match (cpus.is_some(), on(0), on(1)) {
+            (true, true, true) => ("██", GOOD),
+            (true, true, false) | (true, false, true) => ("█·", WARN),
+            _ => ("··", DIM),
+        }
+    };
+
+    // Fixed-width cell builder: every cell contributes exactly CELL_W chars
+    // (padding is computed from the styled parts), so the rows can never drift
+    // against the border row no matter how the glyph strings change.
+    const CELL_W: usize = 9;
+    let selected_style = Style::default().add_modifier(Modifier::REVERSED);
+    let push_cell = |spans: &mut Vec<Span<'static>>, parts: &[(&str, Style)], sel: bool| {
+        let mut used = 0usize;
+        for (s, st) in parts {
+            used += s.chars().count();
+            let st = if sel { st.patch(selected_style) } else { *st };
+            spans.push(Span::styled((*s).to_string(), st));
+        }
+        let pad = CELL_W.saturating_sub(used);
+        if pad > 0 {
+            spans.push(Span::styled(" ".repeat(pad), Style::default()));
+        }
+    };
+    let sep = |c: char| -> Span<'static> { Span::styled(c.to_string(), Style::default().fg(DIM)) };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if inner.width >= 92 {
+        let border_row = |left: char, right: char, mid: char| -> Vec<Span<'static>> {
+            let mut b: Vec<Span> = vec![sep(' '), sep(' '), sep(left)];
+            for core in 0..8u32 {
+                b.push(Span::styled("─".repeat(CELL_W), Style::default().fg(DIM)));
+                b.push(sep(if core == 7 { right } else { mid }));
+            }
+            b
+        };
+        let mut header: Vec<Span> = vec![sep(' '), sep(' '), sep('│')];
+        let mut fw: Vec<Span> = vec![sep(' '), sep(' '), sep('│')];
+        let mut os: Vec<Span> = vec![sep(' '), sep(' '), sep('│')];
+        for core in 0..8u32 {
+            let sel = focused && core as usize == app.core_sel;
+            let head_parts: [(&str, Style); 1] = [(
+                &format!("  core {core}"),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )];
+            push_cell(&mut header, &head_parts, sel);
+            header.push(sep('│'));
+            let fw_on = cs.mask & (1 << core) != 0;
+            let fw_parts: [(&str, Style); 2] = [
+                ("  fw ", Style::default().fg(DIM)),
+                (
+                    if fw_on { "██" } else { "··" },
+                    Style::default().fg(if fw_on { GOOD } else { DIM }),
+                ),
+            ];
+            push_cell(&mut fw, &fw_parts, sel);
+            fw.push(sep('│'));
+            let (pair, col) = match &app.core_draft {
+                Some(d) if (core as usize) < 8 => {
+                    // Draft view: show the DESIRED state, warn when it
+                    // differs from live (pending).
+                    let live_on = cs
+                        .per_core
+                        .iter()
+                        .find(|(c, _)| *c == core)
+                        .map(|(_, v)| v.iter().any(|(_, on)| *on))
+                        .unwrap_or(false);
+                    let want = d[core as usize];
+                    let p = if want { "██" } else { "··" };
+                    let c = if want != live_on {
+                        WARN
+                    } else if want {
+                        GOOD
+                    } else {
+                        DIM
+                    };
+                    (p, c)
+                }
+                _ => thread_pair(core),
+            };
+            let os_parts: [(&str, Style); 2] = [
+                ("  os ", Style::default().fg(DIM)),
+                (pair, Style::default().fg(col)),
+            ];
+            push_cell(&mut os, &os_parts, sel);
+            os.push(sep('│'));
+        }
+        lines.push(title);
+        lines.push(Line::from(border_row('╭', '╮', '┬')));
+        lines.push(Line::from(header));
+        lines.push(Line::from(fw));
+        lines.push(Line::from(os));
+        lines.push(Line::from(border_row('╰', '╯', '┴')));
+        lines.push(last);
+    } else {
+        // Narrow terminal: one compact row of cells.
+        let mut cells: Vec<Span> = Vec::new();
+        for core in 0..8u32 {
+            let fw_on = cs.mask & (1 << core) != 0;
+            let (pair, col) = thread_pair(core);
+            let sel = focused && core as usize == app.core_sel;
+            let st = Style::default().fg(col);
+            let st = if sel { st.patch(selected_style) } else { st };
+            cells.push(Span::styled(
+                format!(" c{core}{}{pair} ", if fw_on { "#" } else { "." }),
+                st,
+            ));
+        }
+        lines.push(title);
+        lines.push(Line::from(cells));
+        lines.push(last);
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_gpu(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {

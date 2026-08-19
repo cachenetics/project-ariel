@@ -46,6 +46,8 @@ pub struct PatchStatus {
 
 pub struct Report {
     pub rows: Vec<PatchStatus>,
+    /// Patches that ship on disk but are not in the applied series.
+    pub on_disk: Vec<PatchStatus>,
     /// amdgpu debugfs dir found at probe time (None if unavailable).
     pub dbg_dir: Option<PathBuf>,
     /// Is this host actually a BC-250?
@@ -53,18 +55,24 @@ pub struct Report {
 }
 
 impl Report {
-    /// All series members live (Present or Inferred)?
+    /// All series members live (Present or Inferred)? Optional members
+    /// (patches::OPTIONAL) are excused — their absence is expected on some
+    /// production kernels.
     pub fn fully_patched(&self) -> bool {
-        self.rows
-            .iter()
-            .all(|r| matches!(r.state, State::Present | State::Inferred))
+        self.rows.iter().all(|r| {
+            patches::OPTIONAL.contains(&r.id)
+                || matches!(r.state, State::Present | State::Inferred)
+        })
     }
 
-    /// Members whose unique tell is definitively missing.
+    /// Members whose unique tell is definitively missing, excluding the
+    /// optional ones (their absence must not nag "run apu build").
     pub fn missing(&self) -> Vec<&PatchStatus> {
         self.rows
             .iter()
-            .filter(|r| r.state == State::Absent)
+            .filter(|r| {
+                r.state == State::Absent && !patches::OPTIONAL.contains(&r.id)
+            })
             .collect()
     }
 }
@@ -192,9 +200,12 @@ pub fn report() -> Report {
     //   * mixed / partial         -> Unknown. A partial series (e.g. a kernel
     //     built with only half the patches) must NOT report its undetectable
     //     members as present — "any one present" proved nothing about the rest.
+    // Optional members (patches::OPTIONAL) are left out of the jury so their
+    // deliberate absence does not hold the Bundled members hostage.
     let detectable: Vec<State> = rows
         .iter()
         .filter(|r| !matches!(r.tell, Tell::Bundled))
+        .filter(|r| !patches::OPTIONAL.contains(&r.id))
         .map(|r| r.state)
         .collect();
     let all_present = !detectable.is_empty() && detectable.iter().all(|s| *s == State::Present);
@@ -211,8 +222,26 @@ pub fn report() -> Report {
         }
     }
 
+    // On-disk (not applied) members: probe each tell directly — no bundled
+    // inference, no cross-patch logic. A shared tell (12 with 16) reads as
+    // Present when the applied patch carrying it is live; the TUI labels the
+    // section accordingly.
+    let on_disk: Vec<PatchStatus> = patches::ON_DISK
+        .iter()
+        .map(|p| PatchStatus {
+            id: p.id,
+            title: p.title,
+            tell: p.tell,
+            state: match p.tell {
+                Tell::Bundled => State::Unknown,
+                t => probe(t, dbg.as_deref()),
+            },
+        })
+        .collect();
+
     Report {
         rows,
+        on_disk,
         dbg_dir: dbg,
         is_bc250: ariel_hal::ariel_apu_present(),
     }
@@ -227,8 +256,8 @@ mod tests {
         let d = DoctorJson {
             is_bc250: true,
             kernel: "6.12.4-aputune".into(),
-            present: 12,
-            total: 12,
+            present: patches::count(),
+            total: patches::count(),
             fully: true,
         };
         let s = serde_json::to_string(&d).unwrap();
@@ -239,9 +268,9 @@ mod tests {
         assert!(v["kernel"].is_string());
         assert_eq!(v["kernel"], "6.12.4-aputune");
         assert!(v["present"].is_u64());
-        assert_eq!(v["present"], 12);
+        assert_eq!(v["present"], patches::count() as u64);
         assert!(v["total"].is_u64());
-        assert_eq!(v["total"], 12);
+        assert_eq!(v["total"], patches::count() as u64);
         assert_eq!(v["fully"], serde_json::Value::Bool(true));
         // And it round-trips.
         let back: DoctorJson = serde_json::from_str(&s).unwrap();

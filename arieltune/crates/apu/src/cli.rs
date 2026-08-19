@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! aputune — BC-250 APU liberation + tuner.
+//! aputune, BC-250 APU liberation + tuner.
 //!
 //! One Rust tool that owns the whole Cyan Skillfish liberation surface:
 //!
-//!   patches              report per-patch kernel state (the 12-patch series)
+//!   patches              report per-patch kernel state (the liberation series)
 //!   build                build the patch series into the system (kernel rebuild)
 //!   liberate             guided build: gate, report, explicit tier choice
 //!   cu / cumap           40-CU enable + the harvest map
@@ -30,65 +30,100 @@ use ariel_smu::smu::{self, Smu};
 /// The `arieltune apu` subcommand tree (was `aputune`'s, verbatim minus `Tui` --
 /// the TUI is the suite shell's APU tab now, not a subcommand). Every clamp /
 /// ceiling / refusal / guard is preserved.
+/// APU CLI: liberate the BC-250 (route all 40 CUs) and tune GPU/CPU clocks and voltage.
+///
+/// SMU RULE (read first): arieltune must be the ONLY thing driving the SMU. The board has one MP1
+/// mailbox; a second actuator (dpm_daemon, bc250_smu, another tuner) racing it cripples clocks or
+/// wedges the GPU. Stop other SMU drivers before tuning.
+///
+/// Commands that write hardware need root. Kernel/CU changes need a REBOOT. gpu/cpu clock and voltage
+/// writes act live via the SMU. build/liberate PREVIEW by default and only execute with --run.
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Report the per-patch state of the liberation series on the booted kernel.
+    /// Report the per-patch state of the liberation series on the booted kernel. Read-only.
     Patches {
-        /// Show the embedded patch body for one id (e.g. 12).
+        /// Print the embedded patch body for one id (e.g. 12) instead of the status table.
         #[arg(long, value_name = "ID")]
         show: Option<String>,
     },
-    /// Print the live CU harvest map.
+    /// Print the live CU harvest map (which compute units the driver enumerates). Read-only.
     Cumap,
-    /// 40-CU liberation control.
+    /// CU routing: enable/persist 40 CUs, route per-array WGP masks, bench, and health-test.
+    ///
+    /// Routing writes go through umr and are persisted (survive reboot). An empty shader array is
+    /// REFUSED (compute on it wedges gfx1013). See `arieltune apu cu --help`.
     Cu {
         #[command(subcommand)]
         action: CuCmd,
     },
-    /// GPU clock control + app-driven power (deep-sleep / wake / autosleep).
+    /// GPU clocks + app-driven power: pin/force clock, undervolt, governor, autosleep. Writes the SMU.
+    ///
+    /// Live SMU/overdrive writes (root). Some modes persist and re-apply at boot. See `apu gpu --help`.
     Gpu {
         #[command(subcommand)]
         action: GpuCmd,
     },
-    /// CPU overclock/undervolt: boost clock + F/Vid curve + temp limits.
+    /// CPU overclock/undervolt via SMU queue 3: boost clock + F/Vid curve + temp limits. Writes the SMU.
+    ///
+    /// Live SMU writes (root). A boost/curve combo whose predicted Vid exceeds 1.325 V is REFUSED
+    /// (brick guard). Applied points persist and re-apply at boot. See `apu cpu --help`.
     Cpu {
         #[command(subcommand)]
         action: CpuCmd,
     },
-    /// Build the liberation series into the system (patched kernel + arm 40-CU).
+    /// 8-core CPU unlock (SMU q3 msg 0x98) + live per-core offline control + verify sweep + ACPI fix.
+    ///
+    /// The firmware unlock is all-or-nothing 0x77→0xFF and takes effect at the next WARM reboot; a cold
+    /// boot reverts it and the boot unit re-applies it. Granular core counts are done at the OS layer
+    /// (offline/online, instant). Refuses abnormal masks. See `arieltune-core.md`.
+    Cores {
+        #[command(subcommand)]
+        action: CoreCmd,
+    },
+    /// Build the liberation series into the system (patched kernel + arm 40-CU). Preview unless --run.
+    ///
+    /// Rebuilds the kernel package and needs a REBOOT to take effect. Needs root. Preview by default;
+    /// pass --run to execute. DANGEROUS: this replaces your running kernel.
     Build {
         /// CachyOS PKGBUILD dir (or set APUTUNE_PKGBUILD).
         #[arg(long, value_name = "DIR")]
         pkgbuild: Option<std::path::PathBuf>,
-        /// Deploy + install to a remote target (user@host) instead of locally.
+        /// Deploy + install to a remote target (user@host) over ssh instead of the local box.
         #[arg(long, value_name = "USER@HOST")]
         target: Option<String>,
-        /// Actually execute (default: preview the plan only).
+        /// Actually build and install. Default: preview the plan only.
         #[arg(long)]
         run: bool,
     },
-    /// Guided liberation: BC-250 gate + patch report, then an explicit tier
-    /// choice (full 40-CU / tuning-only / inspect-only) before building.
+    /// Guided liberation: gate on BC-250, report patch state, pick a tier, then build. Preview unless --run.
+    ///
+    /// Wraps `build` with an explicit tier choice (full 40-CU / tuning-only / inspect-only). Needs a
+    /// REBOOT and root. Preview by default; pass --run to execute. Non-tty stdin defaults to inspect-only.
     Liberate {
         /// CachyOS PKGBUILD dir (or set APUTUNE_PKGBUILD).
         #[arg(long, value_name = "DIR")]
         pkgbuild: Option<std::path::PathBuf>,
-        /// Deploy + install to a remote target (user@host) instead of locally.
+        /// Deploy + install to a remote target (user@host) over ssh instead of the local box.
         #[arg(long, value_name = "USER@HOST")]
         target: Option<String>,
-        /// Pick the tier without prompting.
+        /// Pick the tier non-interactively (full | tuning-only | inspect-only), skipping the prompt.
         #[arg(long, value_enum, value_name = "TIER")]
         tier: Option<LiberateTier>,
-        /// Actually execute the build (default: preview the plan only).
+        /// Actually build and install. Default: preview the plan only.
         #[arg(long)]
         run: bool,
     },
-    /// Tuning profiles (bundle CU/GPU/CPU; draft-then-apply).
+    /// Tuning profiles that bundle CU/GPU/CPU settings. Applying is dry-run unless --write.
+    ///
+    /// list/show are read-only; apply previews the plan and only actuates with --write. See `apu profile --help`.
     Profile {
         #[command(subcommand)]
         action: ProfileCmd,
     },
-    /// Preflight: BC-250 check, patch state, debugfs availability.
+    /// Preflight: is this a BC-250, what patches are live, is debugfs available, what persists at boot.
+    ///
+    /// Read-only. --json prints one machine-readable object; --verify exits non-zero unless this is a
+    /// BC-250 with the full series live (the scripted post-reboot check). Prefer both for automation.
     Doctor {
         /// Print a single machine-readable JSON object and nothing else.
         #[arg(long)]
@@ -100,13 +135,13 @@ pub enum Cmd {
     },
 }
 
-/// Liberation tiers — liberation is not all-or-nothing.
+/// Liberation tier: liberation is not all-or-nothing.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum LiberateTier {
     /// Patched kernel + route all 40 CUs (bc250_cc_write_mode=3).
     Full,
-    /// Patched kernel with CU routing OFF (bc250_cc_write_mode=0): telemetry +
-    /// GPU clock control + CPU OC without the 40-CU route (ROCm OpenCL is
+    /// Patched kernel with CU routing OFF (bc250_cc_write_mode=0): telemetry,
+    /// GPU clock control, and CPU OC without the 40-CU route (ROCm OpenCL is
     /// unstable at 40 CU on gfx1013).
     TuningOnly,
     /// No kernel changes; just report patch state (the decline path).
@@ -115,75 +150,77 @@ pub enum LiberateTier {
 
 #[derive(Subcommand)]
 pub enum ProfileCmd {
-    /// List built-in + custom profiles.
+    /// List built-in and custom profiles. Read-only.
     List,
-    /// Show one profile and what applying it would do.
+    /// Show one profile and exactly what applying it would do. Read-only.
     Show { name: String },
-    /// Apply a profile. Dry-run (prints the plan) unless --write.
+    /// Apply a profile (CU + GPU + CPU). Previews the plan; only actuates with --write.
     Apply {
         name: String,
+        /// Actually apply the profile to hardware (root; may arm 40-CU which needs a reboot).
         #[arg(long)]
         write: bool,
     },
-    /// Delete a custom profile.
+    /// Delete a custom profile. Does not touch hardware.
     Delete { name: String },
 }
 
 #[derive(Subcommand)]
 pub enum CuCmd {
-    /// Show CU state (armed?, persisted?, harvest map).
+    /// Show CU state: 40-CU armed?, persisted?, live SPI dispatch route, harvest map. Read-only.
     Status,
-    /// Persist the 40-CU liberation (modprobe.d; takes effect next boot).
+    /// Persist 40-CU liberation via modprobe.d. Takes effect NEXT boot (rebuild initramfs + reboot). Root.
     Enable,
-    /// Remove the persisted liberation (reverts to 24 CU next boot).
+    /// Remove the persisted 40-CU liberation. Reverts to 24 CU on the NEXT boot. Root.
     Disable,
-    /// Route all 40 CUs now (via umr). Persisted (survives reboot) like the TUI.
+    /// Route all 40 CUs into dispatch NOW via umr. Persisted (survives reboot). Root.
     RouteAll,
-    /// Route factory dispatch (24 CU) now. Persisted (survives reboot).
+    /// Route factory dispatch (24 CU) NOW via umr. Persisted (survives reboot). Root.
     RouteFactory,
-    /// Route per-array WGP masks (4 hex masks, e.g. 1f 1f 0f 1f). Persisted.
-    /// An empty shader array is REFUSED (compute on it wedges gfx1013) unless
-    /// --force-unsafe.
+    /// Route per-array WGP masks NOW (4 hex masks, e.g. 1f 1f 0f 1f). Persisted. Root.
+    ///
+    /// Masks are SE0.SH0 SE0.SH1 SE1.SH0 SE1.SH1; only the low 5 bits matter. An empty shader array is
+    /// REFUSED (compute on it wedges gfx1013 and needs a power-cycle) unless --force-unsafe.
     Route {
         masks: Vec<String>,
-        /// UNSAFE override: allow an empty shader array (compute-wedge class).
+        /// UNSAFE: allow an empty shader array. Compute on it wedges the GPU (power-cycle to recover).
         #[arg(long)]
         force_unsafe: bool,
     },
-    /// Toggle a single WGP, like the TUI's space key. Persisted.
+    /// Toggle a single WGP on/off NOW (like the TUI space key). Persisted. Root.
+    ///
     /// array 0..3 = SE0.SH0 / SE0.SH1 / SE1.SH0 / SE1.SH1; wgp 0..4.
     Toggle {
         array: u32,
         wgp: u32,
-        /// UNSAFE override: allow the toggle to empty a shader array.
+        /// UNSAFE: allow the toggle to empty a shader array (compute-wedge class).
         #[arg(long)]
         force_unsafe: bool,
     },
-    /// Bench a routing config's compute throughput: KAT GFLOPS at a pinned clock
-    /// (compute-bound, isolates CU-scaling from memory bandwidth). Non-destructive
-    /// — restores the live route after. No masks = bench the current route.
-    /// Empty-shader-array shapes are refused (wedge class; no override — the
-    /// bench DISPATCHES compute, which is exactly the hang).
+    /// Bench a routing config's compute throughput (KAT GFLOPS at a pinned clock). Non-destructive.
+    ///
+    /// Compute-bound, so it isolates CU scaling from memory bandwidth; restores the live route after.
+    /// No masks = bench the current route. Empty-array shapes are REFUSED with no override (the bench
+    /// dispatches compute, which is exactly the wedge). Root.
     Bench { masks: Vec<String> },
-    /// Persist the current live routing as the service profile + boot re-apply.
+    /// Persist the current live routing as the service profile and arm boot re-apply. Root.
     RouteSave,
-    /// Apply the saved service-profile routing (used by the boot unit). An
-    /// unsafe (empty-array) saved profile is refused and factory-24 applied.
+    /// Apply the saved service-profile routing (used by the boot unit). Root.
+    ///
+    /// An unsafe (empty-array) saved profile is refused and factory-24 applied instead.
     RouteLoad {
-        /// Boot mode: verify the route actually took and retry until it does. The
-        /// umr write can silently no-op if the GPU is not ready right after boot,
+        /// Boot mode: verify the route actually took and retry until it does.
+        /// The umr write can silently no-op if the GPU is not ready right after boot,
         /// so the boot unit uses this. Fails loudly (journal) if it never verifies.
         #[arg(long)]
         boot: bool,
     },
-    /// Un-arm the boot route re-apply (disable + remove arieltune-route.service).
-    /// The saved route.json is kept; `cu route-save` re-arms.
+    /// Un-arm boot route re-apply (disable + remove arieltune-route.service). Keeps route.json; route-save re-arms.
     RouteForget,
-    /// Health-test the CUs with a known-answer Vulkan compute test.
+    /// Health-test the CUs with a known-answer Vulkan compute test (KAT). Non-destructive; needs umr + RADV.
     ///
-    /// Default: the full 40-CU config (correctness + throughput; safe).
-    /// --localize: if a fault is found, route full-40 minus one WGP at a time
-    /// to pinpoint the bad WGP (stays inside the safe routing envelope).
+    /// Default: test the full 40-CU config (correctness + throughput; stays in the safe routing envelope).
+    /// --localize: on a fault, route full-40 minus one WGP at a time to pinpoint the bad WGP.
     Test {
         /// On a fault, run the subtractive sweep to localize the bad WGP.
         #[arg(long)]
@@ -197,103 +234,107 @@ pub enum CuCmd {
 
 #[derive(Subcommand)]
 pub enum GpuCmd {
-    /// Show GPU power state: setpoints (top/deep) + current clock.
+    /// Show GPU power state: top/deep setpoints, manual pin, auto mode, forced Vid, current clock. Read-only.
     Status,
-    /// Pin the GFX clock to a fixed frequency (MHz).
+    /// Pin the GFX clock to a fixed frequency (MHz). Live SMU write; persists and re-applies at boot. Root.
     Force { mhz: u32 },
-    /// Release the GFX clock lock + clear the manual clock (BAPM/autosleep resume).
+    /// Release the GFX clock lock and clear the manual pin (auto mode / BAPM resumes). Root.
     Unforce,
-    /// Transiently pin the GFX clock (MHz) for the duration of a task, e.g. a
-    /// benchmark: stops the GPU power unit and forces the clock, WITHOUT
-    /// persisting or changing the power mode. Pair with `gpu unpin`.
+    /// Transiently pin the GFX clock (MHz) for one task (e.g. a benchmark). Root. Pair with `gpu unpin`.
+    ///
+    /// Stops the GPU power unit and forces the clock WITHOUT persisting or changing the power mode.
+    /// Leaves the power unit stopped until you run `gpu unpin`.
     Pin { mhz: u32 },
-    /// End a `gpu pin`: release the clock and restart the GPU power unit (which
-    /// re-enacts the persisted mode). No persistence change.
+    /// End a `gpu pin`: release the clock and restart the GPU power unit (re-enacts the persisted mode). Root.
     Unpin,
-    /// Enact the persisted GPU power mode from power.json: manual pin, governor,
-    /// autosleep, or released. Run by aputune-gpu.service (the ONE GPU power
-    /// unit); waits out the boot-settle window first.
+    /// Enact the persisted GPU power mode from power.json (manual pin / governor / autosleep / released). Root.
+    ///
+    /// The single aputune-gpu.service entrypoint; waits out the boot-settle window first. Not for interactive use.
     ApplyBoot,
-    /// Alias for apply-boot, kept so an old aputune-gpu-clock.service on an
-    /// un-migrated host still re-applies the persisted mode.
+    /// Alias for apply-boot (kept so an old aputune-gpu-clock.service on an un-migrated host still re-applies). Root.
     ApplySavedForce,
-    /// Set the GPU voltage (mV) at the high clock via amdgpu overdrive
-    /// (pp_od_clk_voltage) — SMU-safe, live, clamped to the driver's OD_RANGE.
-    /// Persisted + re-applied at boot. Use for undervolting the GPU rail.
+    /// Set GPU voltage (mV) at the high clock via amdgpu overdrive (pp_od_clk_voltage). Live, SMU-safe. Root.
+    ///
+    /// Undervolts the GPU rail. Clamped to the driver OD_RANGE and refused below the safe floor for the
+    /// clock (too low crashes the GPU). Persisted and re-applied at boot.
     Vid { mv: u32 },
-    /// Reset the GPU voltage to the stock SMU-managed curve (overdrive restore).
+    /// Reset GPU voltage to the stock SMU-managed curve (overdrive restore). Live. Root.
     UnforceVid,
-    /// Force the active/top clock (your thermal cap). App calls this on work.
-    /// Refused while a manual pin (possibly a heat-pin) is persisted, unless
-    /// --override-pin.
+    /// Force the active/top clock (the app calls this on work). Live SMU write. Root.
+    ///
+    /// REFUSED while a manual pin (possibly a heat-safety pin) is persisted, unless --override-pin.
     Wake {
-        /// Override an active persisted manual pin (e.g. a heat-safety pin).
+        /// Override an active persisted manual pin (e.g. a heat-safety pin). Can push the clock off a heat-pin.
         #[arg(long)]
         override_pin: bool,
     },
-    /// Force the deep-sleep clock (saves ~20 W). App calls this when idle.
-    /// Refused while a manual pin is persisted, unless --override-pin.
+    /// Force the deep-sleep clock to save ~20 W (the app calls this when idle). Live SMU write. Root.
+    ///
+    /// REFUSED while a manual pin is persisted, unless --override-pin.
     DeepSleep {
         /// Override an active persisted manual pin.
         #[arg(long)]
         override_pin: bool,
     },
-    /// Set the governor's high (top/active) tier clock (MHz). Persisted; applied
-    /// live if the governor is running.
+    /// Set the governor high (top/active) tier clock (MHz). Persisted; applied live if the governor runs. Root.
     SetTop { mhz: u32 },
-    /// Set the governor's mid tier clock (MHz). Persisted; live if running.
+    /// Set the governor mid tier clock (MHz). Persisted; applied live if the governor runs. Root.
     SetMid { mhz: u32 },
-    /// Set the governor's idle tier clock (MHz). Persisted; live if running.
+    /// Set the governor idle tier clock (MHz). Persisted; applied live if the governor runs. Root.
     SetIdle { mhz: u32 },
-    /// Set the governor's deep-sleep tier clock (MHz). Persisted; live if running.
+    /// Set the governor deep-sleep tier clock (MHz). Persisted; applied live if the governor runs. Root.
     SetDeep { mhz: u32 },
-    /// Set ONLY the GPU temp cap (C) — the governor demotes to hold it — without
-    /// touching the CPU OC. Persisted (re-applied at boot).
+    /// Set ONLY the GPU temp cap (C); the governor demotes clocks to hold it. Persisted; re-applied at boot. Root.
+    ///
+    /// Does not touch the CPU OC. Range 60..TEMP_MAX_C.
     TempCap { c: u32 },
-    /// Make the fence-rate governor the persistent auto mode (survives reboot).
+    /// Make the fence-rate governor the persistent auto mode (survives reboot). Root.
     GovernorOn,
-    /// Turn the auto governor off: released (native DPM) becomes the persistent
-    /// mode.
+    /// Turn the auto governor off; released (native DPM) becomes the persistent mode. Root.
     GovernorOff,
-    /// Make poke-driven autosleep the persistent auto mode (survives reboot).
-    /// The workload pokes via `aputune gpu poke` on each unit of work.
+    /// Make poke-driven autosleep the persistent auto mode (survives reboot). Root.
+    ///
+    /// The workload calls `arieltune apu gpu poke` on each unit of work to hold the top clock.
     AutosleepOn,
-    /// Touch the poke file so `autosleep` keeps the clock at top (call per request).
+    /// Touch the poke file so an autosleep daemon holds the clock at top. Call once per request/unit of work.
     Poke,
-    /// Poke-driven auto-sleep daemon: force top while poked, release to BAPM when
-    /// idle (so non-poking GPU work is never starved).
+    /// Run the poke-driven autosleep daemon in the foreground: top while poked, release to BAPM when idle. Root.
+    ///
+    /// Blocks until stopped. Releasing to BAPM (not forcing deep) means non-poking GPU work is never starved.
     Autosleep {
+        /// Idle seconds with no poke before dropping the clock (default 30).
         #[arg(long, default_value_t = 30)]
         idle: u64,
-        /// Aggressive: force the deep clock (350) when idle instead of releasing
-        /// to BAPM — saves ~20 W but STARVES any GPU user that doesn't poke.
+        /// Aggressive: force the deep clock (350 MHz) when idle instead of releasing to BAPM. Saves ~20 W
+        /// but STARVES any GPU user that does not poke.
         #[arg(long = "deep-force")]
         deep_force: bool,
     },
-    /// Activity-driven 3-state governor (+ deep-sleep): auto GPU DVFS from the
-    /// ring fence-rate. Runs until stopped (`gpu apply-boot` runs this
-    /// in-process when power.json says governor).
+    /// Run the activity-driven 3-state governor in the foreground (auto DVFS from the ring fence-rate). Root.
+    ///
+    /// Blocks until stopped. `gpu apply-boot` runs this in-process when power.json selects governor mode.
     Governor,
-    /// Coarse sysfs performance level: low|high|auto|profile_standard.
-    /// Refused while a manual pin is persisted, unless --override-pin.
+    /// Set the coarse sysfs performance level: low | high | auto | profile_standard. Root.
+    ///
+    /// REFUSED while a manual pin is persisted, unless --override-pin.
     Level {
         level: String,
         /// Override an active persisted manual pin.
         #[arg(long)]
         override_pin: bool,
     },
-    /// Dump the telemetry node (patch 11).
+    /// Dump the raw GPU telemetry node (patch 11). Read-only.
     Telemetry,
 }
 
 #[derive(Subcommand)]
 pub enum CpuCmd {
-    /// Live CPU state: current Vid, per-core freq, temp limit, P-states.
+    /// Live CPU state: current Vid, per-core freq, temp limit, P-states (via SMU queue 3). Read-only.
     Status,
-    /// Apply a CPU overclock/undervolt (boost clock + F/Vid curve scale + temps).
+    /// Apply a CPU overclock/undervolt (boost + F/Vid curve + temps). Live SMU write; persists at boot. Root.
     ///
-    /// The curve scale (-50..0) undervolts; a boost/scale combo whose predicted
-    /// Vid exceeds 1.325 V is refused (raising clock without undervolt is unsafe).
+    /// Curve scale (-50..0) undervolts. A boost/scale combo whose predicted Vid exceeds 1.325 V is
+    /// REFUSED (brick guard: raising clock without enough undervolt is unsafe). Unset flags keep current.
     Set {
         /// Max CPU boost clock (MHz), 2800..4100. Unset = keep current.
         #[arg(long)]
@@ -308,7 +349,7 @@ pub enum CpuCmd {
         #[arg(long = "gpu-temp")]
         gpu_temp: Option<u32>,
     },
-    /// Undervolt at the current boost: pick the curve scale for a Vid cap (mV).
+    /// Undervolt at a boost clock: pick the deepest curve scale under a Vid cap (mV). Live SMU write. Root.
     Undervolt {
         /// Target boost clock (MHz).
         #[arg(long, default_value_t = 3500)]
@@ -316,31 +357,124 @@ pub enum CpuCmd {
         /// Vid cap (mV) to undervolt toward.
         vid_cap: u32,
     },
-    /// Force an absolute CPU Vid (mV). Hard-capped at 1.325 V.
+    /// Force an absolute CPU Vid (mV). Hard-capped at 1.325 V (brick guard). Live SMU write. Root.
     Vid { mv: u32 },
-    /// Release a forced CPU Vid back to the SMU curve.
+    /// Release a forced CPU Vid back to the SMU-managed curve. Live. Root.
     VidAuto,
-    /// Restore CPU to firmware defaults (and drop the saved OC + boot service).
+    /// Restore CPU to firmware defaults and drop the saved OC + boot service. Live. Root.
     Restore,
-    /// Re-apply the persisted CPU OC (run by arieltune-cpu-oc.service at boot).
+    /// Re-apply the persisted CPU OC (run by arieltune-cpu-oc.service at boot). Root. Not for interactive use.
     ApplySaved,
-    /// Auto-detect: climb the boost clock under torture, undervolting via the
-    /// curve to stay under a Vid cap, and report the highest stable point.
+    /// Auto-detect the highest stable CPU OC: climb boost under torture, undervolting to stay under a Vid cap. Root.
+    ///
+    /// DANGEROUS: runs a real stress sweep on live silicon. Ctrl-C aborts and restores stock. Reports the
+    /// highest stable point; --save stores it as a custom profile (does not apply it).
     Detect {
+        /// Ceiling boost clock (MHz) to climb toward (default 4100).
         #[arg(long = "frequency", default_value_t = 4100)]
         target: u32,
+        /// Vid cap (mV) to undervolt under while climbing (default 1275).
         #[arg(long = "vid", default_value_t = 1275)]
         vid_cap: u32,
+        /// Abort temperature (C) during the sweep (default 90).
         #[arg(long, default_value_t = 90)]
         temp: u32,
+        /// Boost-clock step (MHz) between points (default 100).
         #[arg(long, default_value_t = 100)]
         step: u32,
+        /// Seconds of torture per point (default 8).
         #[arg(long, default_value_t = 8)]
         dwell: u64,
         /// Save the highest stable point as a custom profile of this name.
         #[arg(long, value_name = "NAME")]
         save: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum CoreCmd {
+    /// Firmware mask, state, visible cores/threads, offlined threads, MCE count, boot-unit state. Read-only.
+    Status,
+    /// Unlock all 8 cores now (SMU q3 msg 0x98, all-or-nothing 0x77→0xFF). Refuses abnormal masks. Root.
+    ///
+    /// The new cores appear after a WARM reboot. A cold boot reverts the mask; the boot unit re-applies
+    /// it. Default: no reboot. See `arieltune-core.md`.
+    Apply {
+        /// Warm-reboot immediately after a successful unlock (mask survives warm resets).
+        #[arg(long)]
+        reboot: bool,
+        /// Bypass the 0x77 gate: unlock even from an abnormal mask (e.g. 0xD7). EXPERIMENTAL.
+        #[arg(long)]
+        force_abnormal: bool,
+    },
+    /// Idempotent boot-time path for aputune-cores.service. Never reboots; exit 0 on refusal. Root.
+    Boot,
+    /// Install the boot re-apply unit (aputune-cores.service) and enable it. Root.
+    Install,
+    /// Remove the boot unit. Cores stay unlocked until the next cold boot. Root.
+    Uninstall,
+    /// Advisory per-core health sweep: stress-ng --verify pinned per physical core + MCE grep. Root.
+    ///
+    /// The report is for records only — it NEVER gates anything (fleet images are cloned across
+    /// blades, so persisted verdicts are untrustworthy). Run it when you want to know.
+    Verify {
+        /// Seconds per core (default 20).
+        #[arg(default_value_t = 20)]
+        seconds: u64,
+    },
+    /// 8-core ACPI SSDT-CST/PST initcpio override. status read-only; install/revert need root.
+    ///
+    /// The stock tables stop at C00B (12 threads); after unlock, threads 12-15 get no C-states.
+    /// The 8-core tables cover C00-C00F (over-coverage is harmless for any mask).
+    Acpi {
+        #[command(subcommand)]
+        action: AcpiCmd,
+    },
+    /// Offline a physical core's threads at the OS layer (live, instant, reversible). Root.
+    ///
+    /// This is the granular control layer: any core count is reached by unlock + offlining,
+    /// never by firmware masks. Omit CORE to offline every core except 0.
+    Offline {
+        /// Physical core id (0-7); omit for all except 0.
+        core: Option<u32>,
+    },
+    /// Online a physical core's threads at the OS layer (live, instant). Root.
+    Online {
+        /// Physical core id (0-7); omit for all.
+        core: Option<u32>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AcpiCmd {
+    /// Threads, cpus without idle states, installed CST coverage. Read-only.
+    Status,
+    /// Download + stage the 8-core tables, add the acpi_override hook, rebuild initramfs. Root.
+    Install,
+    /// Restore backed-up tables (or remove the override) and rebuild initramfs. Root.
+    Revert,
+}
+
+/// Dispatch for `arieltune apu cores`.
+fn cmd_cores(action: CoreCmd) -> Result<()> {
+    match action {
+        CoreCmd::Status => crate::cores::status(),
+        CoreCmd::Apply {
+            reboot,
+            force_abnormal,
+        } => crate::cores::apply(reboot, force_abnormal),
+        CoreCmd::Boot => crate::cores::boot(),
+        CoreCmd::Install => crate::cores::install(),
+        CoreCmd::Uninstall => crate::cores::uninstall(),
+        CoreCmd::Verify { seconds } => crate::cores::verify(seconds),
+        CoreCmd::Acpi { action } => match action {
+            AcpiCmd::Status => crate::cores::acpi_status(),
+            AcpiCmd::Install => crate::cores::acpi_install(),
+            AcpiCmd::Revert => crate::cores::acpi_revert(),
+        },
+        CoreCmd::Offline { core } => crate::cores::offline(core),
+        CoreCmd::Online { core } => crate::cores::online(core),
+    }
 }
 
 /// Run one `arieltune apu` subcommand. The suite bin owns SIGPIPE, `Cli::parse`,
@@ -354,6 +488,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
         Cmd::Cu { action } => cmd_cu(action),
         Cmd::Gpu { action } => cmd_gpu(action),
         Cmd::Cpu { action } => cmd_cpu(action),
+        Cmd::Cores { action } => cmd_cores(action),
         Cmd::Build {
             pkgbuild,
             target,
@@ -387,14 +522,14 @@ fn cmd_profile(action: ProfileCmd) -> Result<()> {
         }
         ProfileCmd::Show { name } => {
             let p = profile::find(&name).ok_or_else(|| anyhow::anyhow!("no profile '{name}'"))?;
-            println!("{} — {}\n", p.name, p.description);
+            println!("{}, {}\n", p.name, p.description);
             for l in p.plan_lines() {
                 println!("  {l}");
             }
         }
         ProfileCmd::Apply { name, write } => {
             let p = profile::find(&name).ok_or_else(|| anyhow::anyhow!("no profile '{name}'"))?;
-            println!("profile '{}' — {}", p.name, p.description);
+            println!("profile '{}', {}", p.name, p.description);
             for l in p.plan_lines() {
                 println!("  {l}");
             }
@@ -402,14 +537,14 @@ fn cmd_profile(action: ProfileCmd) -> Result<()> {
                 println!("\n(dry-run; pass --write to apply)");
                 return Ok(());
             }
-            // Validate the WHOLE profile before any actuation — a bad CPU point
+            // Validate the WHOLE profile before any actuation, a bad CPU point
             // or GPU mode must not leave a half-applied profile behind.
             p.validate()?;
             let oc = ocq3::OcQ3::open_checked().ok();
             // CPU + GPU go through the shared state machine (same paths as the
             // CLI `cpu set` / `gpu force|unforce`, persistence included).
             p.apply(oc.as_ref())?;
-            // CU arming last (persisted/reboot action) — after live actuation
+            // CU arming last (persisted/reboot action), after live actuation
             // succeeded, so an apply failure can't leave the modprobe.d changed.
             match p.cu_40 {
                 Some(true) => {
@@ -442,7 +577,7 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
                 Some(m) => print!("{}", cu::render(&m)),
                 None => println!("  harvest map: unavailable (amdgpu not queryable)"),
             }
-            // Live SPI dispatch route — what the GPU actually runs on RIGHT NOW.
+            // Live SPI dispatch route, what the GPU actually runs on RIGHT NOW.
             // Distinct from the harvest map above (driver CU enumeration): a box
             // can be 40-CU "liberated" yet dispatch to only a subset, so report
             // the live route explicitly rather than let the harvest count mislead.
@@ -482,10 +617,10 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
             if !detect::report()
                 .rows
                 .iter()
-                .any(|r| r.id == "12" && matches!(r.state, detect::State::Present))
+                .any(|r| r.id == "16" && matches!(r.state, detect::State::Present))
             {
                 println!(
-                    "WARNING: the 40-CU kernel patch (12) is not detected live — \
+                    "WARNING: the 40-CU kernel patch (16) is not detected live, \
                      enable will be a no-op until the patched kernel is built in (`arieltune apu build`)."
                 );
             }
@@ -513,7 +648,7 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
         } => {
             let m = parse_masks(&masks)?;
             if force_unsafe {
-                eprintln!("WARNING: --force-unsafe — empty-shader-array wedge guard bypassed");
+                eprintln!("WARNING: --force-unsafe, empty-shader-array wedge guard bypassed");
                 curoute::apply_forced(m)?;
             } else {
                 curoute::apply(m)?;
@@ -544,7 +679,7 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
             );
             anyhow::ensure!(wgp < 5, "wgp must be 0..4");
             if force_unsafe {
-                eprintln!("WARNING: --force-unsafe — empty-shader-array wedge guard bypassed");
+                eprintln!("WARNING: --force-unsafe, empty-shader-array wedge guard bypassed");
             }
             let m = curoute::toggle_wgp(array as usize, wgp, force_unsafe)?;
             let p = persist_route();
@@ -578,7 +713,7 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
                 0.0
             };
             println!(
-                "bench [{:02x} {:02x} {:02x} {:02x}]: {} CU routed  —  {:.0} GFLOPS  ({:.1} /CU)  ({})",
+                "bench [{:02x} {:02x} {:02x} {:02x}]: {} CU routed, {:.0} GFLOPS  ({:.1} /CU)  ({})",
                 m[0],
                 m[1],
                 m[2],
@@ -630,7 +765,7 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
         CuCmd::RouteForget => {
             persist::disable_route();
             println!(
-                "boot route re-apply disarmed (unit removed); {} kept — `cu route-save` re-arms",
+                "boot route re-apply disarmed (unit removed); {} kept, `cu route-save` re-arms",
                 curoute::PROFILE_PATH
             );
         }
@@ -663,12 +798,12 @@ fn cmd_cu_test(localize: bool, probe: bool) -> Result<()> {
         // Safety validation: exercise the subtractive routing shape (full-40
         // minus one WGP) regardless of fault state. Every config keeps all four
         // shader arrays populated.
-        println!("PROBE: subtractive sweep (full-40 minus one WGP) — safety check\n");
+        println!("PROBE: subtractive sweep (full-40 minus one WGP), safety check\n");
         cutest::test_localize(kat_row)?;
         return Ok(());
     }
 
-    println!("CU health-test — known-answer Vulkan compute (KAT)\n");
+    println!("CU health-test, known-answer Vulkan compute (KAT)\n");
     let full = cutest::test_full()?;
     kat_row(&full);
 
@@ -683,7 +818,7 @@ fn cmd_cu_test(localize: bool, probe: bool) -> Result<()> {
         std::process::exit(1);
     }
 
-    println!("\nlocalizing — routing full-40 minus one WGP at a time:");
+    println!("\nlocalizing, routing full-40 minus one WGP at a time:");
     // In the subtractive sweep, ok==true means removing that WGP cleared the
     // fault, i.e. that WGP holds the bad CU.
     let sweep = cutest::test_localize(|h| {
@@ -727,7 +862,7 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
             // armed, which auto controller owns the clock otherwise, and any
             // persisted voltage override.
             match cfg.force_mhz {
-                Some(m) => println!("  manual pin:       {m} MHz (force_mhz ARMED — wins at boot)"),
+                Some(m) => println!("  manual pin:       {m} MHz (force_mhz ARMED, wins at boot)"),
                 None => println!("  manual pin:       none"),
             }
             println!("  auto mode:        {}", gpuctl::mode_name(cfg.auto_mode));
@@ -745,7 +880,7 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
                             .and_then(|(_, r)| r.split_whitespace().next().map(String::from))
                     })
                 })
-                .or_else(|| telemetry::current_sclk_mhz().map(|m| m.to_string()));
+                .or_else(|| telemetry::gfxclk_mhz().map(|m| m.to_string()));
             match cur {
                 Some(c) => println!("  current GfxClk:    {c} MHz"),
                 None => println!("  current GfxClk:    unknown"),
@@ -763,9 +898,9 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
                 );
             }
             let note = if out.held {
-                "manual mode — sticks across reboots"
+                "manual mode, sticks across reboots"
             } else {
-                "LIVE-ONLY — will NOT survive a reboot"
+                "LIVE-ONLY, will NOT survive a reboot"
             };
             if out.set_mhz != mhz {
                 println!(
@@ -777,38 +912,38 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
             }
             if !out.held {
                 eprintln!(
-                    "WARNING: could not install the boot re-apply service — this pin is \
+                    "WARNING: could not install the boot re-apply service, this pin is \
                      REBOOT-UNSAFE. Re-run as root, or the clock reverts to auto on reboot."
                 );
             }
         }
         GpuCmd::Unforce => {
             // Shared transition: release clock + voltage, clear ONLY the manual
-            // pin — the persisted auto mode is preserved, not clobbered to
+            // pin, the persisted auto mode is preserved, not clobbered to
             // governor (releasing a pin must not flip autosleep/released boxes).
             let mode = gpuctl::unforce()?;
             println!(
-                "GFX clock + voltage released — auto mode ({}) resumed",
+                "GFX clock + voltage released, auto mode ({}) resumed",
                 gpuctl::mode_name(mode)
             );
         }
         GpuCmd::Pin { mhz } => {
             // Stop the GPU power unit FIRST (its daemon unforces on stop), then
-            // hard-force — transient, no persistence, no mode change. On ANY
+            // hard-force, transient, no persistence, no mode change. On ANY
             // failure after the stop, the unit is started again before returning:
             // a dead GPU power unit means no governor and no heat-pin.
             persist::stop_gpu_unit();
             let pin = || -> Result<u32> {
                 let target = mhz.clamp(smu::SCLK_MIN_MHZ, smu::SCLK_MAX_MHZ);
                 // Same crash class as force: a persisted undervolt sized for a
-                // lower clock must be raised (transiently — not persisted)
+                // lower clock must be raised (transiently, not persisted)
                 // before the clock lands on it.
                 let cfg = dpm::PowerConfig::load_or_default();
                 if let Some((old, floor)) = gpuctl::required_vid_raise(&cfg, target) {
                     anyhow::ensure!(
                         telemetry::od_set_vddc(target, floor),
                         "cannot raise GPU undervolt {old} -> {floor} mV for {target} MHz \
-                         (overdrive write failed) — refusing to pin onto a starved rail"
+                         (overdrive write failed), refusing to pin onto a starved rail"
                     );
                     println!(
                         "note: raised GPU voltage {old} -> {floor} mV for the pin (transient)"
@@ -818,7 +953,7 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
             };
             match pin() {
                 Ok(set) => println!(
-                    "pinned {set} MHz (transient — GPU power unit stopped; run `gpu unpin` after)"
+                    "pinned {set} MHz (transient, GPU power unit stopped; run `gpu unpin` after)"
                 ),
                 Err(e) => {
                     persist::start_gpu_unit();
@@ -829,16 +964,19 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
         GpuCmd::Unpin => {
             Smu::open()?.unforce_gfx_freq()?;
             persist::start_gpu_unit();
-            println!("unpinned — GPU power unit restarted (persisted mode resumes)");
+            println!("unpinned, GPU power unit restarted (persisted mode resumes)");
         }
         GpuCmd::ApplyBoot | GpuCmd::ApplySavedForce => gpu_apply_boot()?,
         GpuCmd::Vid { mv } => {
             // Set the GPU voltage at the TOP clock via amdgpu overdrive
             // (pp_od_clk_voltage). amdgpu serializes the SMU write, so it's safe
-            // live under load — no governor coordination, no MP1 race. Use the
+            // live under load, no governor coordination, no MP1 race. Use the
             // configured top clock (not the live one) so it never pins the max
             // clock low. Persist so it re-applies at boot.
             let _lock = dpm::ConfigLock::acquire();
+            // The OD interface is gated by PP_OVERDRIVE_MASK — refuse loudly
+            // instead of letting the write below be inert.
+            telemetry::ensure_overdrive()?;
             let mut cfg = dpm::PowerConfig::load_or_default();
             // Floor at the highest reachable clock: top, a manual force, OR the
             // governor high tier (writable independently of top_mhz).
@@ -846,13 +984,13 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
             let floor = telemetry::min_gfx_vddc(clk);
             if mv < floor {
                 anyhow::bail!(
-                    "{mv} mV is below the safe floor {floor} mV for {clk} MHz — that undervolt \
+                    "{mv} mV is below the safe floor {floor} mV for {clk} MHz, that undervolt \
                      would crash the GPU. Raise the voltage, or lower the clock first (set-top)."
                 );
             }
             if !telemetry::od_set_vddc(clk, mv) {
                 anyhow::bail!(
-                    "voltage set failed — overdrive off (amdgpu.ppfeaturemask) or need root, \
+                    "voltage set failed, overdrive off (amdgpu.ppfeaturemask) or need root, \
                      or {mv} mV is outside the OD_RANGE VDDC"
                 );
             }
@@ -863,7 +1001,7 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
             println!(
                 "GPU voltage set to {mv} mV at the high clock{}",
                 if persist::gpu_unit_installed() {
-                    " — persisted, re-applied at boot"
+                    ", persisted, re-applied at boot"
                 } else {
                     " (live now; run a gpu mode command to install the boot unit)"
                 }
@@ -872,13 +1010,13 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
         GpuCmd::UnforceVid => {
             // Restore the stock voltage curve (SMU-managed) via amdgpu overdrive.
             if !telemetry::od_reset() {
-                anyhow::bail!("voltage reset failed — overdrive off or need root");
+                anyhow::bail!("voltage reset failed, overdrive off or need root");
             }
             let _lock = dpm::ConfigLock::acquire();
             let mut cfg = dpm::PowerConfig::load_or_default();
             cfg.force_vid_mv = None;
             cfg.save()?;
-            println!("GPU voltage released — stock SMU-managed curve restored");
+            println!("GPU voltage released, stock SMU-managed curve restored");
         }
         GpuCmd::Wake { override_pin } => {
             let cfg = dpm::PowerConfig::load_or_default();
@@ -899,7 +1037,7 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
             cfg.set_top(mhz)?;
             let mut g = dpm::GovernorConfig::load_or_default();
             g.high_mhz = mhz;
-            // An inverted ladder makes thermal demotion RAISE the clock — refuse.
+            // An inverted ladder makes thermal demotion RAISE the clock, refuse.
             g.validate_ladder()?;
             // Raising the clock onto a stale low undervolt is the classic crash
             // (e.g. 887 mV set for 1500 is far too low for 2230). The floor keys
@@ -997,7 +1135,7 @@ fn cmd_gpu(action: GpuCmd) -> Result<()> {
             cfg.save()?;
             persist::log_transition("governor-off -> released");
             persist::apply_mode()?;
-            println!("auto governor: OFF — released (native DPM)");
+            println!("auto governor: OFF, released (native DPM)");
         }
         GpuCmd::AutosleepOn => {
             // Poke-driven autosleep becomes the persisted auto mode; the unit
@@ -1051,11 +1189,11 @@ fn guard_manual_pin(cfg: &dpm::PowerConfig, override_pin: bool, what: &str) -> R
         if override_pin {
             eprintln!(
                 "WARNING: overriding the persisted {m} MHz manual pin with `{what}` \
-                 (--override-pin) — the pin re-asserts on the next unit restart/boot"
+                 (--override-pin), the pin re-asserts on the next unit restart/boot"
             );
         } else {
             anyhow::bail!(
-                "a manual clock pin is persisted at {m} MHz (possibly a heat-safety pin) — \
+                "a manual clock pin is persisted at {m} MHz (possibly a heat-safety pin), \
                  `{what}` would silently override it. Release it first (`gpu unforce`) or \
                  pass --override-pin."
             );
@@ -1064,7 +1202,7 @@ fn guard_manual_pin(cfg: &dpm::PowerConfig, override_pin: bool, what: &str) -> R
     Ok(())
 }
 
-/// `gpu apply-boot` — the single aputune-gpu.service entrypoint (also the
+/// `gpu apply-boot`, the single aputune-gpu.service entrypoint (also the
 /// `apply-saved-force` alias for un-migrated hosts). Enacts the persisted GPU
 /// power mode from power.json:
 ///
@@ -1074,11 +1212,11 @@ fn guard_manual_pin(cfg: &dpm::PowerConfig, override_pin: bool, what: &str) -> R
 ///   Released        -> release to native DPM (exit 0)
 ///
 /// HEAT-SAFETY INVARIANT: a persisted manual pin (e.g. a 350 MHz heat-pin) MUST
-/// come back pinned after a reboot — the manual branch is unconditional on a
+/// come back pinned after a reboot, the manual branch is unconditional on a
 /// migrated host and always wins over auto_mode.
 fn gpu_apply_boot() -> Result<()> {
     // Fail-SAFE load: a power.json that EXISTS but does not parse may have held
-    // a heat-pin — it must never default to governor-at-top (dpm::boot_plan).
+    // a heat-pin, it must never default to governor-at-top (dpm::boot_plan).
     let load = dpm::load_for_boot();
     let plan = dpm::boot_plan(&load);
     let cfg = match &load {
@@ -1088,8 +1226,8 @@ fn gpu_apply_boot() -> Result<()> {
     // Boot-settle: forcing/governing a just-booted GPU (sdma ring still resetting)
     // has wedged the box, so wait out an uptime window before touching the SMU
     // (a no-op on a live restart already past it). The window is mode-aware: a
-    // manual pin to a LOW clock is a single, gentle SMU write — nothing like the
-    // governor's climb-to-run load burst — so it uses a much shorter settle to
+    // manual pin to a LOW clock is a single, gentle SMU write, nothing like the
+    // governor's climb-to-run load burst, so it uses a much shorter settle to
     // minimise the heat-exposure window before a heat-pin lands. Auto modes and
     // HIGH manual pins keep the full settle (forcing a high clock early is the
     // wedge-prone case).
@@ -1106,26 +1244,26 @@ fn gpu_apply_boot() -> Result<()> {
         Some(up) => {
             let wait = settle - up;
             eprintln!(
-                "arieltune apu apply-boot: boot-settle — waiting {wait:.0}s (uptime {up:.0}s)"
+                "arieltune apu apply-boot: boot-settle, waiting {wait:.0}s (uptime {up:.0}s)"
             );
             std::thread::sleep(std::time::Duration::from_secs_f64(wait));
         }
         // Fail CLOSED: with /proc/uptime unreadable we can't prove the settle
-        // window has passed — sleep the FULL window rather than skip it (an
+        // window has passed, sleep the FULL window rather than skip it (an
         // early SMU force on a just-booted GPU is the wedge class).
         None => {
             eprintln!(
-                "arieltune apu apply-boot: /proc/uptime unreadable — sleeping the full \
+                "arieltune apu apply-boot: /proc/uptime unreadable, sleeping the full \
                  {settle:.0}s settle (fail-closed)"
             );
             std::thread::sleep(std::time::Duration::from_secs_f64(settle));
         }
     }
-    // CORRUPT power.json: pin the deep/idle-safe LOW clock and stop — the lost
+    // CORRUPT power.json: pin the deep/idle-safe LOW clock and stop, the lost
     // config may have been a heat-pin, so no auto controller is started.
     if let dpm::BootPlan::FailSafePin(m) = plan {
         eprintln!(
-            "arieltune apu apply-boot: power.json is CORRUPT — fail-safe: pinning {m} MHz, \
+            "arieltune apu apply-boot: power.json is CORRUPT, fail-safe: pinning {m} MHz, \
              no auto controller (repair or delete {} and re-set the mode)",
             dpm::CONFIG_PATH
         );
@@ -1152,11 +1290,11 @@ fn gpu_apply_boot() -> Result<()> {
     if let dpm::BootPlan::Manual(m) = plan {
         // Un-migrated-host guard (apply-saved-force alias): never re-force the
         // clock while ANY legacy GPU unit (governor OR autosleep) is still
-        // enabled — two writers on the SMU is the wedge class. A migrated host
+        // enabled, two writers on the SMU is the wedge class. A migrated host
         // has no legacy units, so the pin is applied unconditionally there.
         if persist::any_legacy_gpu_unit_enabled() {
             println!(
-                "legacy GPU unit(s) still enabled — skipping manual clock re-apply \
+                "legacy GPU unit(s) still enabled, skipping manual clock re-apply \
                  (un-migrated host)"
             );
             return Ok(());
@@ -1166,10 +1304,10 @@ fn gpu_apply_boot() -> Result<()> {
         return Ok(());
     }
     // Same guard for the auto modes: on an un-migrated host the legacy
-    // governor/autosleep unit still owns auto — don't start a second daemon.
+    // governor/autosleep unit still owns auto, don't start a second daemon.
     if persist::any_legacy_gpu_unit_enabled() {
         println!(
-            "legacy GPU unit(s) still enabled — leaving auto mode to them \
+            "legacy GPU unit(s) still enabled, leaving auto mode to them \
              (un-migrated host; a gpu mode command migrates)"
         );
         return Ok(());
@@ -1264,7 +1402,7 @@ fn cmd_cpu(action: CpuCmd) -> Result<()> {
             );
             if pt.boost_mhz > ocq3::BOOST_WARN_MHZ {
                 println!(
-                    "note: {} MHz is aggressive — stress-test thoroughly.",
+                    "note: {} MHz is aggressive, stress-test thoroughly.",
                     pt.boost_mhz
                 );
             }
@@ -1272,8 +1410,8 @@ fn cmd_cpu(action: CpuCmd) -> Result<()> {
             // service that re-applies it (aputune cpu apply-saved).
             pt.save()?;
             match persist::enable_cpu_oc() {
-                Ok(()) => println!("persisted — re-applied on every boot"),
-                Err(e) => println!("(live only — could not install boot service: {e})"),
+                Ok(()) => println!("persisted, re-applied on every boot"),
+                Err(e) => println!("(live only, could not install boot service: {e})"),
             }
         }
         CpuCmd::Undervolt { boost, vid_cap } => {
@@ -1324,7 +1462,7 @@ fn cmd_cpu(action: CpuCmd) -> Result<()> {
                     pt.gpu_temp_c,
                 );
             } else {
-                println!("no saved CPU OC — nothing to apply");
+                println!("no saved CPU OC, nothing to apply");
             }
         }
         CpuCmd::Detect {
@@ -1398,9 +1536,13 @@ fn cmd_cpu(action: CpuCmd) -> Result<()> {
 
 fn cmd_patches(show: Option<String>) -> Result<()> {
     if let Some(id) = show {
-        match patches::SERIES.iter().find(|p| p.id == id) {
+        let found = patches::SERIES
+            .iter()
+            .find(|p| p.id == id)
+            .or_else(|| patches::ON_DISK.iter().find(|p| p.id == id));
+        match found {
             Some(p) => {
-                println!("# {} — {}\n# touches: {}\n", p.id, p.title, p.touches);
+                println!("# {}, {}\n# touches: {}\n", p.id, p.title, p.touches);
                 print!("{}", p.body);
             }
             None => println!("no such patch: {id}"),
@@ -1424,12 +1566,31 @@ fn cmd_patches(show: Option<String>) -> Result<()> {
     }
     println!();
     for r in &rep.rows {
-        println!("{} {:<5} {}", r.state.glyph(), r.id, r.title);
+        let tag = if patches::OPTIONAL.contains(&r.id) {
+            "  (optional)"
+        } else {
+            ""
+        };
+        println!("{} {:<5} {}{}", r.state.glyph(), r.id, r.title, tag);
+    }
+    if !rep.on_disk.is_empty() {
+        println!("\non disk, not applied:");
+        for r in &rep.on_disk {
+            let tell = match r.tell {
+                patches::Tell::ModParam(n) => format!("amdgpu.{n}"),
+                patches::Tell::Debugfs(n) => n.to_string(),
+                patches::Tell::SclkMax(m) => format!("sclk >= {m} MHz"),
+                patches::Tell::CuCount(n) => format!(">= {n} CUs"),
+                patches::Tell::Bundled => "none (superseded/shared)".into(),
+            };
+            println!("    [od] {:<5} {}   (tell: {})", r.id, r.title, tell);
+        }
+        println!("    (not built by `arieltune apu build` — opt in via the series)");
     }
     let missing = rep.missing();
     if !missing.is_empty() {
         println!(
-            "\n{} patch(es) absent — run `arieltune apu build` to build the series into the system.",
+            "\n{} patch(es) absent, run `arieltune apu build` to build the series into the system.",
             missing.len()
         );
     }
@@ -1450,7 +1611,7 @@ fn print_series(rep: &detect::Report) {
 }
 
 /// Ask which liberation tier to apply. Defaults to inspect-only (decline) on
-/// empty input, EOF, or a non-tty stdin — a kernel build must never start by
+/// empty input, EOF, or a non-tty stdin, a kernel build must never start by
 /// accident.
 fn prompt_tier() -> Result<LiberateTier> {
     use std::io::{BufRead, IsTerminal, Write};
@@ -1461,7 +1622,7 @@ fn prompt_tier() -> Result<LiberateTier> {
     println!("                   (ROCm OpenCL is unstable at 40 CU on gfx1013)");
     println!("  3) inspect-only  report patch state, change nothing  [default]");
     if !std::io::stdin().is_terminal() {
-        println!("stdin is not a tty — taking the default (inspect-only)");
+        println!("stdin is not a tty, taking the default (inspect-only)");
         return Ok(LiberateTier::InspectOnly);
     }
     print!("choose [1/2/3, default 3]: ");
@@ -1476,11 +1637,11 @@ fn prompt_tier() -> Result<LiberateTier> {
         "1" | "full" => Ok(LiberateTier::Full),
         "2" | "tuning-only" | "tuning" => Ok(LiberateTier::TuningOnly),
         "" | "3" | "inspect-only" | "inspect" => Ok(LiberateTier::InspectOnly),
-        other => anyhow::bail!("unrecognized choice '{other}' — nothing done"),
+        other => anyhow::bail!("unrecognized choice '{other}', nothing done"),
     }
 }
 
-/// `aputune liberate` — orchestration over `kbuild::build`: gate on the
+/// `aputune liberate`, orchestration over `kbuild::build`: gate on the
 /// silicon, short-circuit if already liberated, then an explicit tier choice.
 /// Preview-first like `build`: without --run the chosen tier's plan is printed
 /// and nothing executes.
@@ -1492,11 +1653,11 @@ fn cmd_liberate(
 ) -> Result<()> {
     // Gate first: never offer a kernel build on non-BC-250 silicon.
     if !ariel_hal::ariel_apu_present() {
-        anyhow::bail!("not a BC-250 (PCI 1002:13fe not found) — nothing to liberate");
+        anyhow::bail!("not a BC-250 (PCI 1002:13fe not found), nothing to liberate");
     }
     let rep = detect::report();
     if rep.fully_patched() {
-        println!("liberation series already live — nothing to do.");
+        println!("liberation series already live, nothing to do.");
         print_series(&rep);
         return Ok(());
     }
@@ -1506,7 +1667,7 @@ fn cmd_liberate(
     };
     match tier {
         LiberateTier::InspectOnly => {
-            println!("inspect-only — no kernel changes.");
+            println!("inspect-only, no kernel changes.");
             print_series(&rep);
             println!("\nre-run `arieltune apu liberate` (or `arieltune apu build`) when ready.");
             Ok(())
@@ -1578,7 +1739,7 @@ fn cmd_doctor(json: bool, verify: bool) -> Result<()> {
         Some(m) => println!("  CUs active: {}/{}", m.active, m.possible),
         None => println!("  CUs active: unknown (amdgpu not queryable)"),
     }
-    // Boot re-apply arming state — which persisted tunables come back on reboot.
+    // Boot re-apply arming state, which persisted tunables come back on reboot.
     let cfg = dpm::PowerConfig::load_or_default();
     println!(
         "  boot units: gpu {}  cpu-oc {}  route {}",
@@ -1633,21 +1794,21 @@ fn parse_masks(masks: &[String]) -> anyhow::Result<[u32; 4]> {
     Ok(m)
 }
 
-/// Persist the just-applied CU routing so it survives reboots — snapshot the live
-/// masks to the profile + arm the boot re-apply service. Same as the TUI's apply.
 /// Boot route re-apply retry budget: up to ATTEMPTS tries, DELAY_S apart, so the
 /// route still lands if the GPU is not ready in the first seconds after boot.
 const BOOT_ROUTE_ATTEMPTS: u32 = 8;
 const BOOT_ROUTE_DELAY_S: u64 = 8;
 
+/// Persist the just-applied CU routing so it survives reboots, snapshot the live
+/// masks to the profile + arm the boot re-apply service. Same as the TUI's apply.
 fn persist_route() -> bool {
     curoute::save_profile().is_ok() && persist::enable_route().is_ok()
 }
 
 fn persist_tag(persisted: bool) -> &'static str {
     if persisted {
-        " — persisted (survives reboot)"
+        ", persisted (survives reboot)"
     } else {
-        " (live only — could not persist)"
+        " (live only, could not persist)"
     }
 }

@@ -2,7 +2,8 @@
 //! CPU overclock / undervolt — the reverse-engineered OC model, on the queue-3 OC mailbox
 //! ([`ocq3`]).
 //!
-//! The BC-250's 6-core Zen2 is governed by the SMU's F/Vid curve, not a static
+//! The BC-250's harvested Zen2 (6 cores stock, 8 after the SMU core-mask
+//! unlock) is governed by the SMU's F/Vid curve, not a static
 //! voltage. You raise the **max boost clock** and **scale the F/Vid curve down**
 //! to undervolt — the SMU then picks voltage per the (scaled) curve, capped.
 //! Plus CPU/GPU temp limits.
