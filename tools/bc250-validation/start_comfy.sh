@@ -17,7 +17,9 @@ echo "HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-UNSET}"
 echo "BC250_WARMUP=${BC250_WARMUP}"
 
 cd /opt/ComfyUI || exit 1
-nohup python3 main.py --listen 0.0.0.0 --port 8188 --fp16-vae \
+# Bind loopback only — the API has no auth; remote access can be added with
+# --listen 0.0.0.0 explicitly when needed.
+nohup python3 main.py --listen 127.0.0.1 --port 8188 --fp16-vae \
     > /var/tmp/comfy.log 2>&1 &
 echo "pid=$!"
 
