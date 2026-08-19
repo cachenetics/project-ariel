@@ -15,6 +15,7 @@
 //! 0xFF000000 MMIO window). Writes are AND-only (program bits 1->0; no erase) —
 //! the OEM-edit path appends into erased (0xFF) free space, so that's fine.
 
+use std::fs;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::io::AsRawFd;
@@ -145,6 +146,24 @@ pub fn build() -> io::Result<()> {
         return Err(io::Error::other(format!(
             "{script} failed — see its output above (need root, dkms, and kernel headers)."
         )));
+    }
+    // Persist autoload so the driver comes back after reboots: the DKMS install
+    // only drops the module into the module tree; nothing else writes the
+    // modules-load / modprobe.d entries. The port is persisted from the FADT
+    // (same source load() uses), so a boot autoload and a manual load can never
+    // disagree about smi_port.
+    let port = smi_cmd_port()
+        .map_err(|e| io::Error::other(format!("cannot persist smiflash boot config: {e}")))?;
+    fs::create_dir_all("/etc/modules-load.d").ok();
+    fs::create_dir_all("/etc/modprobe.d").ok();
+    if fs::write("/etc/modules-load.d/99-smiflash.conf", "smiflash\n").is_err()
+        || fs::write(
+            "/etc/modprobe.d/smiflash.conf",
+            format!("options smiflash smi_port=0x{port:x}\n"),
+        )
+        .is_err()
+    {
+        eprintln!("warning: could not persist smiflash boot config (boot autoload will be missing)");
     }
     Ok(())
 }

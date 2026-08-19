@@ -23,6 +23,7 @@ build)
   [ -d "$SRC/.git" ] || git clone "$UPSTREAM" "$SRC"
   git -C "$SRC" checkout "$UPSTREAM_COMMIT"
   git -C "$SRC" apply "$HERE/0001-nct6687-bc250-ec-firmware-attach.patch"
+  git -C "$SRC" apply "$HERE/0002-nct6687-silence-secondary-port-open-bus.patch"
   # The board's linux-headers package may ship a trimmed tree missing
   # non-x86 arch Kconfigs; stub them so syncconfig can generate autoconf.h.
   for i in $(seq 1 40); do
@@ -30,7 +31,11 @@ build)
     [ -z "$m" ] && break
     mkdir -p "$KBUILD/$(dirname "$m")"; : > "$KBUILD/$m"
   done
-  make -C "$KBUILD" M="$SRC" modules
+  # The board's kernel is clang-built (see include/config/CC_IS_CLANG); its
+  # flags are clang-only, so pass LLVM=1. gcc-built kernels build as before.
+  LLVM_ARG=
+  [ -e "$KBUILD/include/config/CC_IS_CLANG" ] && LLVM_ARG="LLVM=1"
+  make -C "$KBUILD" M="$SRC" $LLVM_ARG modules
   echo "built: $SRC/nct6687.ko  (copy to the board and run: $0 install nct6687.ko)"
   ;;
 install)

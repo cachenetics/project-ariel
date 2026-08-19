@@ -36,6 +36,11 @@ Against upstream `Fred78290/nct6687d` @ `cd735225`:
 3. (Consequence of 1) the dual-port `-EEXIST` self-collision, fixed by the
    `0x2e` gate above.
 
+`0002-nct6687-silence-secondary-port-open-bus.patch` removes the misleading
+`force=1 refused: chip ID 0xffff` log line: a `0xffff` on the secondary SIO
+port `0x4e` is expected open-bus (nothing present), not a refusal. The primary
+port `0x2e` attaches fine — the message just made the boot log look broken.
+
 Readings were validated against nct6683's known-good values (SoC temp, rail
 voltages, fan RPM all matched) before any PWM write, confirming the register
 map is correct.

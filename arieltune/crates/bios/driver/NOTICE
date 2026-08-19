@@ -6,10 +6,8 @@ Linux kernel module: it is compiled against and links the GPL-2.0 Linux kernel,
 and it declares `MODULE_LICENSE("GPL")` with an `SPDX-License-Identifier:
 GPL-2.0` header.
 
-This subtree is licensed **GPL-2.0-only** -- the same license (GPL-2.0-only)
-that covers the arieltune project at the repository top level. arieltune
-carries this subtree as an asset the way a package manager carries the kernel
-modules it builds.
+This subtree is therefore licensed GPL-2.0-only — the same license as this project
+(GPL-2.0-only, matching upstream cachenetics/project-ariel).
 
     author: Cachenetics
 
