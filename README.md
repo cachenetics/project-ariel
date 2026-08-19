@@ -49,19 +49,34 @@ own risk, on hardware you own.
 This suite is the work of the BC-250 community. It exists because people did the hard
 measurement on real hardware and shared it.
 
+Core of this release:
+
 - **nightcarnage** - the liberation suite, end to end: the amdgpu kernel patch series
   (13-28), the 8-core CPU unlock with its safety gates and Core Map UI, the out-of-tree
-  driver fixes (nct6687, smiflash), and the userland tuning tools. Also the C refactors of
-  the KIQ/GFXOFF work and the clean-blade validation that stands behind every patch.
-- **GabriWar (Gabriel Duarte Guerra)** - the compute-TLB fix (patch 25, `flush-by-runlist`):
-  the only invalidation measured to actually work on this silicon, and the reason ROCm
-  compute is memory-safe on the board. Plus the SMU core-mask unlock primitive and the ROCm
-  kernel hardening series.
-- **Fabian** - the original GFXOFF-disable and KIQ-bypass fixes (patches 13/14/15), the
-  foundation of GPU stability under compute on the BC-250.
-- **neoney** - the KIQ PASID-flush investigation (patch 21).
+  driver fixes (nct6687, smiflash), and the userland tuning tools, plus the C refactors of
+  the KIQ/GFXOFF work and the clean-blade validation behind every patch.
+- **GabriWar (Gabriel Duarte Guerra)** - the compute-TLB fix (patch 25, `flush-by-runlist`),
+  the only invalidation measured to actually work on this silicon; the SMU core-mask unlock
+  primitive; the ROCm kernel hardening series; and the MEC firmware disassembly / fault corpus.
+- **Fabian** (with **Dani**) - the original GFXOFF-disable and KIQ-bypass fixes (patches
+  13/14/15) and the production research repo they stand on.
+- **FilippoR** - the 8-core telemetry / core-count helper (patch 28) and the userspace
+  gfxclk-query work.
+- **neoney** - the KIQ bypass discovery and PASID-flush investigation (patch 21).
 
-Full license attribution is in `THIRD_PARTY_NOTICES` and the per-subtree NOTICE files.
+Standing on prior BC-250 community work, with thanks:
+
+- **the bc250-collective - mrfrakes and dantistnfs** - who started it all: the original
+  board bring-up, SMU mailboxing, and enablement groundwork everything here builds on.
+- **duggasco** - the 40-CU enumeration/dispatch research on Cyan Skillfish.
+- **WinnieLV** - the live CU manager whose `apply_target_masks` register sequence this ports.
+- **ethkey**, the ASRock `bc250_memcfg` / RobinMemTiming work - the memory-timing tooling the
+  MEM tab is built on; and **walkjivefly** for taking the first plunge.
+- **anrp**, **wtfuzz** - additional findings; and **humvee** and the wider BC-250 Discord
+  community for the testing, reports, and momentum that keep this effort moving.
+
+Full license attribution is in `THIRD_PARTY_NOTICES` and the per-subtree NOTICE files; see
+[`arieltune/README.md`](arieltune/README.md) for the detailed technical acknowledgments.
 
 ## Licensing
 
