@@ -41,14 +41,16 @@ pub const ACPI_OVERRIDE_DIR: &str = "/etc/initcpio/acpi_override";
 pub const ACPI_BACKUP_DIR: &str = "/etc/initcpio/acpi_override-backups";
 pub const MKINITCPIO_CONF: &str = "/etc/mkinitcpio.conf";
 pub const REPORT_DIR: &str = "/var/lib/aputune";
-pub const ACPI_TABLES: &[(&str, &str)] = &[
+pub const ACPI_TABLES: &[(&str, &str, &str)] = &[
     (
         "SSDT-CST.aml",
         "https://github.com/mendesrr/bc250-acpi-fix-updated-8c/raw/refs/heads/main/SSDT-CST.aml",
+        "4ed0dfbae974426bdcc1d7d55da1d9669e5b7cc7c54b6e0683e8f2a6c76fbb81",
     ),
     (
         "SSDT-PST.aml",
         "https://github.com/mendesrr/bc250-acpi-fix-updated-8c/raw/refs/heads/main/SSDT-PST.aml",
+        "1fb4a2d01a32eee3b9226bcbb19f63878c346d434a360b1bb28f837d4a1a3eb0",
     ),
 ];
 
@@ -652,7 +654,7 @@ pub fn acpi_install() -> Result<()> {
     }
     fs::create_dir_all(ACPI_OVERRIDE_DIR).context("mkdir acpi override")?;
     fs::create_dir_all(ACPI_BACKUP_DIR).context("mkdir acpi backup")?;
-    for (name, url) in ACPI_TABLES {
+    for (name, url, sha) in ACPI_TABLES {
         let dst = Path::new(ACPI_OVERRIDE_DIR).join(name);
         if dst.exists() {
             fs::copy(&dst, Path::new(ACPI_BACKUP_DIR).join(name))
@@ -665,6 +667,13 @@ pub fn acpi_install() -> Result<()> {
             .status()?;
         if !st.success() {
             bail!("download of {name} failed (network needed)");
+        }
+        // Pin the artifact: refuse a changed AML instead of staging it.
+        let out = Command::new("sha256sum").arg(&dst).output()?;
+        let got = String::from_utf8_lossy(&out.stdout);
+        let got = got.split_whitespace().next().unwrap_or("");
+        if got != *sha {
+            bail!("sha256 mismatch for {name} (expected {sha}, got {got}) — refusing staged AML");
         }
         println!("staged {name} (backup kept in {ACPI_BACKUP_DIR})");
     }
@@ -706,7 +715,7 @@ pub fn acpi_install() -> Result<()> {
 /// `aputune cores acpi revert`.
 pub fn acpi_revert() -> Result<()> {
     let mut reverted = false;
-    for (name, _) in ACPI_TABLES {
+    for (name, _, _) in ACPI_TABLES {
         let dst = Path::new(ACPI_OVERRIDE_DIR).join(name);
         let bak = Path::new(ACPI_BACKUP_DIR).join(name);
         if bak.exists() {

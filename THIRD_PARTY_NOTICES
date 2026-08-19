@@ -32,5 +32,10 @@ notices:
 5. Fred78290/nct6687d (https://github.com/Fred78290/nct6687d)
    GPL-2.0 — Frederic Boltz. Base of the nct6687 kernel driver subtree.
 
+6. neoney (BC-250 Discord community)
+   GPL-2.0 (kernel patch base). Original author of the KIQ PASID-flush
+   disable idea shipped as on-disk (not applied) patch 21, verified by
+   GabriWar; attribution retained in SERIES.md and the patch header.
+
 The MIT and CC BY-SA 4.0 components above remain under their own terms within
 this GPL-2.0-only project; their notices are retained here per their licenses.
