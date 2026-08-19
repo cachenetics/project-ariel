@@ -1,0 +1,20 @@
+# BC-250 8-core CPU unlock — boot re-apply unit (reference copy; aputune
+# writes this same file via `arieltune apu cores install`).
+#
+# RULES (see arieltune-core.md):
+#   * NEVER reboots — an earlier community unit bootlooped a real board.
+#   * The `boot` verb is idempotent: 0xFF -> exit 0; 0x77 -> apply mask and
+#     exit 0 (cores appear on the next operator-chosen reboot); any other
+#     mask -> journal the refusal and exit 0 (no restart storm).
+[Unit]
+Description=BC-250 8-core unlock (SMU msg 0x98)
+After=multi-user.target
+ConditionPathExists=/sys/bus/pci/devices/0000:00:00.0/config
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/arieltune apu cores boot
+
+[Install]
+WantedBy=multi-user.target
