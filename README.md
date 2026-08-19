@@ -44,6 +44,25 @@ bad value can fail to POST and need a power-cycle or CMOS-clear. Read each tool'
 `SECURITY.md` and its inline safety notes first; firmware and memory tuning are done at your
 own risk, on hardware you own.
 
+## Credits
+
+This suite is the work of the BC-250 community. It exists because people did the hard
+measurement on real hardware and shared it.
+
+- **nightcarnage** - the liberation suite, end to end: the amdgpu kernel patch series
+  (13-28), the 8-core CPU unlock with its safety gates and Core Map UI, the out-of-tree
+  driver fixes (nct6687, smiflash), and the userland tuning tools. Also the C refactors of
+  the KIQ/GFXOFF work and the clean-blade validation that stands behind every patch.
+- **GabriWar (Gabriel Duarte Guerra)** - the compute-TLB fix (patch 25, `flush-by-runlist`):
+  the only invalidation measured to actually work on this silicon, and the reason ROCm
+  compute is memory-safe on the board. Plus the SMU core-mask unlock primitive and the ROCm
+  kernel hardening series.
+- **Fabian** - the original GFXOFF-disable and KIQ-bypass fixes (patches 13/14/15), the
+  foundation of GPU stability under compute on the BC-250.
+- **neoney** - the KIQ PASID-flush investigation (patch 21).
+
+Full license attribution is in `THIRD_PARTY_NOTICES` and the per-subtree NOTICE files.
+
 ## Licensing
 
 The whole project is **GPL-2.0-only**, matching upstream cachenetics/project-ariel.
