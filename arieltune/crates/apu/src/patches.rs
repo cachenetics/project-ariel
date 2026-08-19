@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! The BC-250 liberation kernel-patch series, embedded into the binary.
 //!
-//! aputune *owns* the silicon-liberation surface: the curated 12-patch CachyOS amdgpu
+//! aputune *owns* the silicon-liberation surface: the curated CachyOS amdgpu
 //! series (authored on `linux-cachyos-bore-7.0.2`, structurally identical through
 //! `7.0.9` — the pinned, known-good kernel) ships inside the binary as data, and
 //! each patch carries the *runtime tell* that proves it is live on the running
@@ -12,10 +12,10 @@
 //! Pin to `linux-cachyos-bore-7.0.9`. Newer kernels (7.0.11+) regress the BC-250
 //! SDMA path — do not build the series against them until that is resolved.
 //!
-//! The patches themselves are GPL-2.0 (kernel diffs), the same license as the
-//! rest of arieltune (GPL-2.0-only). arieltune carries them as build assets the
-//! way a package manager carries the patches it applies - they are not linked
-//! into the binary.
+//! The patches themselves are GPL-2.0 (kernel diffs) — the same license as this
+//! project (GPL-2.0-only, matching upstream cachenetics/project-ariel).
+//! arieltune carries them as build assets applied by the kernel-build path — they
+//! are not linked into the binary.
 
 /// How to prove, at runtime, that a given patch is live on the booted kernel.
 #[derive(Clone, Copy, Debug)]
@@ -201,21 +201,71 @@ pub const SERIES: &[Patch] = &[
         Tell::Debugfs("cyan_skillfish_telemetry")
     ),
     patch!(
-        "12",
-        "12-unlock-all-40-compute-units.patch",
-        "amdgpu.bc250_cc_write_mode: CC + SPI(0x1F) + RLC(0x1F) -> 40 CUs",
-        "Re-enables all 40 CUs on the Sony-binned board (default 24). Clears \
-         the CC_GC_SHADER_ARRAY_CONFIG harvest mask, sets the per-shader-array \
-         SPI dispatch mask to 0x1F, and the RLC power-gate override to 0x1F — \
-         all three are required; any one alone is a no-op. Gated on PCI \
-         0x13FE and off by default (bc250_cc_write_mode; mode 3 = full \
-         liberation, measured +69% FP32).",
+        "13",
+        "13-gfxoff-disable-gfx1013.patch",
+        "GFXOFF disabled for gfx1013 (Cyan Skillfish) — Layer 1 stability",
+        "Disables GFXOFF power-saving state for IP 10.1.3 (BC-250/gfx1013). \
+         The GPU cannot reliably wake from GFXOFF, and since the BC-250's \
+         internal PCIe fabric lacks completion timeout, any MMIO read to a \
+         sleeping GPU hangs the CPU indefinitely. Runs early in hw_init, \
+         before any GFXOFF transition is attempted. First of the three-layer \
+         v3 protection system.",
+        "gfx_v10_0.c",
+        Tell::Bundled
+    ),
+    patch!(
+        "14",
+        "14-gmc-kiq-bypass-dead-gpu.patch",
+        "KIQ bypass + dead-GPU detection in gmc_v10_0.c — Layer 2a",
+        "Five sub-patches hardening the gfx10.x TLB flush: (a) gfx10.1.x \
+         jumps to direct MMIO via goto use_mmio, skipping the KIQ ring; \
+         (b) pre-spinlock 0xFFFFFFFF health check bails early if GPU is \
+         unreachable; (c) semaphore acquire loop detects dead GPU; \
+         (d) ACK-wait loop detects dead GPU and releases semaphore; \
+         (e) disables KIQ-based PASID flush in hw_init for gfx10.1.x. \
+         Generation-specific counterpart to patch 15.",
+        "gmc_v10_0.c",
+        Tell::Bundled
+    ),
+    patch!(
+        "15",
+        "15-amdgpu-gmc-kiq-bypass.patch",
+        "KIQ bypass + dead-GPU detection in amdgpu_gmc.c — Layer 2b",
+        "Two sub-patches hardening the centralized GMC: (a) in \
+         flush_gpu_tlb_pasid, gfx10.1.x bypasses the KIQ ring and calls \
+         the ASIC-specific flush directly via MMIO; (b) in \
+         fw_reg_write_reg_wait, gfx10.1.x short-circuits the entire KIQ \
+         path with a direct MMIO write + polling loop, including pre-write \
+         health check and dead-GPU detection. Together with patch 14, \
+         eliminates the BC-250 KIQ hang.",
+        "amdgpu_gmc.c",
+        Tell::Bundled
+    ),
+    patch!(
+        "16",
+        "16-cu-unlock-cc-spi-safe-no-rlc.patch",
+        "BC-250 40 CU unlock — CC+SPI only, NO RLC_PG (safe for ROCm/HSA)",
+        "Re-enables all 40 CUs using CC_GC_SHADER_ARRAY_CONFIG=0 and \
+         SPI_PG_ENABLE_STATIC_WGP_MASK=0x1f per shader array. \
+         RLC_PG_ALWAYS_ON_WGP_MASK is deliberately NOT written: doing so \
+         while RLC firmware is running hangs the RLC on uninitialized WGP \
+         handshake registers, causing a system hang on first rocBLAS/HSA \
+         launch. BC-250 already has global PG off, making the RLC write \
+         redundant. Safe for both Vulkan/RADV and ROCm/HSA. Controlled \
+         via amdgpu.bc250_cc_write_mode=3. Supersedes the excluded patch 12, \
+         which also writes RLC_PG and is Vulkan-only.",
         "gfx_v10_0.c",
         Tell::ModParam("bc250_cc_write_mode")
     ),
-];
-
-/// Number of patches in the embedded series.
-pub fn count() -> usize {
-    SERIES.len()
-}
+    patch!(
+        "12",
+        "12-unlock-all-40-compute-units.patch",
+        "Vulkan-only 40-CU unlock (Studebaker)",
+        "The original 40-CU unlock that also writes RLC_PG_ALWAYS_ON_WGP_MASK. \
+         Safe for Vulkan/RADV; hangs ROCm/HSA on the first KFD queue, which is \
+         why patch 16 (no RLC write) is the applied one. Kept on disk for \
+         Vulkan-only setups. Note: its tell is shared with patch 16, so the \
+         TUI cannot tell the two apart on a live kernel.",
+        "gfx_v10_0.c",
+        Tell::ModParam("bc250_cc_write_mode")
+    ),

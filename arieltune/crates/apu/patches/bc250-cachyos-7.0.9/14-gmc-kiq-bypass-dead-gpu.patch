@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BC-250 Liberation Project <bc250@invalid>
+Date: Sun, 6 Jul 2026 00:00:00 +0000
+Subject: [PATCH] drm/amdgpu: KIQ bypass + dead-GPU detection in gmc_v10_0.c
+
+Layer 2 (GPU-generation-specific) of the v3 three-layer protection.
+Modifies the gfx10.x TLB flush code (gmc_v10_0.c) with five sub-patches:
+
+  a) KIQ bypass in gmc_v10_0_flush_gpu_tlb:
+     gfx10.1.x (including gfx1013/BC-250) skips the KIQ ring path and
+     falls through to direct MMIO register access via goto use_mmio.
+
+  b) Pre-spinlock health check:
+     Before taking invalidate_lock, read the ACK register. If it returns
+     0xFFFFFFFF the GPU is unreachable — bail out instead of spinning.
+
+  c) Semaphore acquire dead-GPU detection:
+     Inside the semaphore polling loop, detect 0xFFFFFFFF reads and
+     abort with error message + spin_unlock.
+
+  d) ACK-wait dead-GPU detection:
+     In the TLB-flush ACK polling loop, detect 0xFFFFFFFF reads and
+     abort cleanly, releasing the semaphore if needed.
+
+  e) Disable KIQ-based PASID flush in gmc_v10_0_hw_init:
+     For gfx10.1.x, force flush_pasid_uses_kiq = false so TLB
+     invalidations always go through the direct MMIO path.
+
+Certified: 2026-06-14 — llama.cpp ROCm service, clean dmesg.
+
+Signed-off-by: BC-250 Liberation Project <bc250@invalid>
+---
+diff --git a/gmc_v10_0.c b/gmc_v10_0.c
+index ce6e042..2c72b1f 100644
+--- a/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
+@@ -272,6 +272,16 @@ static void gmc_v10_0_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
+ 	/* This is necessary for SRIOV as well as for GFXOFF to function
+ 	 * properly under bare metal
+ 	 */
++	/* ===== BC-250 v2 PATCH: KIQ bypass ===== */
++	/* BC-250 / Cyan Skillfish (gfx1013): KIQ ring TLB flush hangs.
++	 * Skip to direct MMIO register path. Widen to all gfx10.1.x.
++	 */
++	{
++		uint32_t gc_ver = amdgpu_ip_version(adev, GC_HWIP, 0);
++		if ((gc_ver >= IP_VERSION(10, 1, 0)) && (gc_ver < IP_VERSION(10, 2, 0)))
++			goto use_mmio;
++	}
++	/* ===== BC-250 v2 PATCH END ===== */
+ 	if (adev->gfx.kiq[0].ring.sched.ready && !adev->enable_mes &&
+ 	    (amdgpu_sriov_runtime(adev) || !amdgpu_sriov_vf(adev))) {
+ 		amdgpu_gmc_fw_reg_write_reg_wait(adev, req, ack, inv_req,
+@@ -280,7 +290,25 @@ static void gmc_v10_0_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
+ 	}
+ 
+ 	/* This path is needed before KIQ/MES/GFXOFF are set up */
++use_mmio:
+ 	hub_ip = (vmhub == AMDGPU_GFXHUB(0)) ? GC_HWIP : MMHUB_HWIP;
++	/* ===== BC-250 v3 PATCH: Pre-spinlock health check ===== */
++	{
++		uint32_t gc_ver = amdgpu_ip_version(adev, GC_HWIP, 0);
++		if ((gc_ver >= IP_VERSION(10, 1, 0)) &&
++		    (gc_ver < IP_VERSION(10, 2, 0))) {
++			tmp = RREG32_RLC_NO_KIQ(ack, hub_ip);
++			if (tmp == 0xFFFFFFFF) {
++				dev_err_ratelimited(adev->dev,
++					"BC-250: GPU unreachable (MMIO 0xFFFFFFFF), "
++					"skipping TLB flush vmid=%u hub=%u\n",
++					vmid, vmhub);
++				return;
++			}
++		}
++	}
++	/* ===== BC-250 v3 PATCH END ===== */
++
+ 
+ 	spin_lock(&adev->gmc.invalidate_lock);
+ 	/*
+@@ -295,6 +323,14 @@ static void gmc_v10_0_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
+ 		for (i = 0; i < adev->usec_timeout; i++) {
+ 			/* a read return value of 1 means semaphore acuqire */
+ 			tmp = RREG32_RLC_NO_KIQ(sem, hub_ip);
++				/* ===== BC-250 v3 PATCH: sem dead-GPU check ===== */
++				if (tmp == 0xFFFFFFFF) {
++					dev_err_ratelimited(adev->dev,
++						"BC-250: GPU died during sem acquire (0xFFFFFFFF)\n");
++					spin_unlock(&adev->gmc.invalidate_lock);
++					return;
++				}
++				/* ===== BC-250 v3 PATCH END ===== */
+ 			if (tmp & 0x1)
+ 				break;
+ 			udelay(1);
+@@ -317,6 +353,16 @@ static void gmc_v10_0_flush_gpu_tlb(struct amdgpu_device *adev, uint32_t vmid,
+ 	/* Wait for ACK with a delay.*/
+ 	for (i = 0; i < adev->usec_timeout; i++) {
+ 		tmp = RREG32_RLC_NO_KIQ(ack, hub_ip);
++				/* ===== BC-250 v3 PATCH: ACK-wait dead-GPU check ===== */
++				if (tmp == 0xFFFFFFFF) {
++					dev_err_ratelimited(adev->dev,
++						"BC-250: GPU died during TLB flush ACK wait (0xFFFFFFFF)\n");
++					if (use_semaphore)
++						WREG32_RLC_NO_KIQ(sem, 0, hub_ip);
++					spin_unlock(&adev->gmc.invalidate_lock);
++					return;
++				}
++				/* ===== BC-250 v3 PATCH END ===== */
+ 		tmp &= 1 << vmid;
+ 		if (tmp)
+ 			break;
+@@ -986,7 +1032,15 @@ static int gmc_v10_0_hw_init(struct amdgpu_ip_block *ip_block)
+ 	struct amdgpu_device *adev = ip_block->adev;
+ 	int r;
+ 
+-	adev->gmc.flush_pasid_uses_kiq = !amdgpu_emu_mode;
++	/* ===== BC-250 v2 PATCH: Disable KIQ-based PASID flush ===== */
++	{
++		uint32_t gc_ver = amdgpu_ip_version(adev, GC_HWIP, 0);
++		if ((gc_ver >= IP_VERSION(10, 1, 0)) && (gc_ver < IP_VERSION(10, 2, 0)))
++			adev->gmc.flush_pasid_uses_kiq = false;
++		else
++			adev->gmc.flush_pasid_uses_kiq = !amdgpu_emu_mode;
++	}
++	/* ===== BC-250 v2 PATCH END ===== */
+ 
+ 	/* The sequence of these two function calls matters.*/
+ 	gmc_v10_0_init_golden_registers(adev);
+-- 
+2.45.0
