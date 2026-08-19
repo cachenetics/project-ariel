@@ -41,9 +41,9 @@ GabriWar's companion `0002-bc250-rocm-vm-flush.patch` was reviewed and is
 | `10` | `10-print-full-32bit-cac-value.patch` | `cyan_skillfish_ppt.c` | CAC print widened to 32-bit (correct CAC-node output) |
 | `11` | `11-full-telemetry-dump-debugfs.patch` | `cyan_skillfish_ppt.c` | `cyan_skillfish_telemetry` node (clocks/pstates/voltages) |
 | `12` | `12-unlock-all-40-compute-units.patch` | `gfx_v10_0.c` | *(on disk, NOT applied)* Studebaker's CU unlock: CC + SPI(0x1F) + RLC(0x1F) → all 40 CUs (⚠️ Vulkan-only, hangs ROCm/HSA) — superseded by `16` |
-| `13` | `13-gfxoff-disable-gfx1013.patch` | `gfx_v10_0.c` | **NEW** GFXOFF disabled for gfx1013 — prevents GPU power-state hangs (c) Fabian, used with permission |
-| `14` | `14-gmc-kiq-bypass-dead-gpu.patch` | `gmc_v10_0.c` | **NEW** KIQ bypass + dead-GPU detection in gmc_v10_0 TLB flush (5 sub-patches) (c) Fabian, used with permission |
-| `15` | `15-amdgpu-gmc-kiq-bypass.patch` | `amdgpu_gmc.c` | **NEW** KIQ bypass + dead-GPU detection in centralized GMC code (2 sub-patches) (c) Fabian, used with permission |
+| `13` | `13-gfxoff-disable-gfx1013.patch` | `gfx_v10_0.c` | **NEW** GFXOFF disabled for gfx1013 — prevents GPU power-state hangs (c) Fabian & Dani (git.fmkr.de/Fabian), used with permission; src git.sudx.de/Fabian/ROCm-Research-Archive |
+| `14` | `14-gmc-kiq-bypass-dead-gpu.patch` | `gmc_v10_0.c` | **NEW** KIQ bypass + dead-GPU detection in gmc_v10_0 TLB flush (5 sub-patches) (c) Fabian & Dani (git.fmkr.de/Fabian), used with permission; src git.sudx.de/Fabian/ROCm-Research-Archive |
+| `15` | `15-amdgpu-gmc-kiq-bypass.patch` | `amdgpu_gmc.c` | **NEW** KIQ bypass + dead-GPU detection in centralized GMC code (2 sub-patches) (c) Fabian & Dani (git.fmkr.de/Fabian), used with permission; src git.sudx.de/Fabian/ROCm-Research-Archive |
 | `16` | `16-cu-unlock-cc-spi-safe-no-rlc.patch` | `gfx_v10_0.c` | **NEW** BC-250 40 CU unlock — CC+SPI only, NO RLC_PG (safe for ROCm+HSA) |
 | `17` | `17-bc250-gfx1013-fault-probe.patch` | `gmc_v10_0.c` | **NEW** gfx1013 instruction-fetch fault probe — diagnostic, report-only. Marked *optional* in detection: kernels without it (like the deployed build2) still report fully patched. |
 | `18` | `18-ttm-guard-null-pages-on-unpopulate.patch` | `amdgpu_ttm.c` | **NEW** Guard NULL `ttm->pages[]` on unpopulate — survive compute faults |
