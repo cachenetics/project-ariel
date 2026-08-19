@@ -24,7 +24,7 @@ The unified BC-250 tuning suite. One tabbed TUI, with a matching CLI, over four 
 
 The stock amdgpu driver keeps the BC-250 harvested: 24 CUs, locked clocks. arieltune ships a curated amdgpu kernel patch series that unlocks all 40 CUs, adds race-free SMU clock control, CPU clock limits, and live telemetry. It drives the whole kernel build and install for you: roughly a 30 minute build plus a reboot, always previewed first, and it only acts with `--run`.
 
-Build the series against `linux-cachyos-bore-7.0.9`. Not 7.0.11+, which regresses BC-250 SDMA. Each of the 12 diffs is explained in `crates/apu/patches/bc250-cachyos-7.0.9/SERIES.md`.
+Build the series against `linux-cachyos-bore-7.0.9`. Not 7.0.11+, which regresses BC-250 SDMA. The series is numbered `01`-`28` (24 applied on a default build, 4 kept on disk but not applied); each diff is explained in `crates/apu/patches/bc250-cachyos-7.0.9/SERIES.md`.
 
 ## Quick start
 
