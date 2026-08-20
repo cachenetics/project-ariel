@@ -367,6 +367,104 @@ fn extracted_src(pkgbuild: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Required (binary, package) pairs for a build on THIS host. `local_install`
+/// is true when `opts.target` is None (the install/mkinitcpio steps run on
+/// this host too, not on a remote target).
+fn required_deps(opts: &BuildOpts) -> Vec<(String, String)> {
+    let cxx = opts.cc.replace("gcc", "g++");
+    let mut req = vec![
+        ("makepkg".to_string(), "pacman".to_string()),
+        (opts.cc.clone(), "gcc15".to_string()),
+        (cxx, "gcc15".to_string()),
+        ("bc".to_string(), "bc".to_string()),
+        ("patch".to_string(), "base-devel".to_string()),
+        ("make".to_string(), "base-devel".to_string()),
+    ];
+    if opts.target.is_none() {
+        req.push(("mkinitcpio".to_string(), "mkinitcpio".to_string()));
+    }
+    req
+}
+
+/// Which of `required` are absent, per the `present` probe. Returns the
+/// missing (binary, package) pairs in input order.
+fn missing_deps(
+    required: &[(&str, &str)],
+    present: &impl Fn(&str) -> bool,
+) -> Vec<(String, String)> {
+    required
+        .iter()
+        .filter(|(bin, _)| !present(bin))
+        .map(|(bin, pkg)| (bin.to_string(), pkg.to_string()))
+        .collect()
+}
+
+/// Scan `$PATH` for `bin` as a real, existing file (std only, no `which`
+/// dependency). Doesn't check executable bits; a present-but-not-+x binary is
+/// a rarer, louder failure than a plain missing one and still surfaces fast
+/// once makepkg/patch actually try to run it.
+fn path_has(bin: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(bin).is_file())
+}
+
+/// Render the `sudo pacman -S --needed <pkgs>` hint for a missing set,
+/// deduped, in first-seen order.
+fn install_hint(missing: &[(String, String)]) -> String {
+    let mut pkgs: Vec<&str> = Vec::new();
+    for (_, pkg) in missing {
+        if !pkgs.contains(&pkg.as_str()) {
+            pkgs.push(pkg.as_str());
+        }
+    }
+    format!("sudo pacman -S --needed {}", pkgs.join(" "))
+}
+
+/// Format the missing-deps block shared by the abort (`--run`) and warning
+/// (preview) paths.
+fn missing_deps_message(missing: &[(String, String)]) -> String {
+    let mut lines = vec!["missing build dependencies:".to_string()];
+    for (bin, pkg) in missing {
+        lines.push(format!("  {bin} (from package {pkg})"));
+    }
+    lines.push(String::new());
+    lines.push(install_hint(missing));
+    lines.join("\n")
+}
+
+/// Pre-flight the build-tool dependencies on THIS host, before any heavy
+/// work (materialize/extract). `makepkg -o --nodeps` / `makepkg -e ...
+/// --nodeps` never ask pacman to check these, so a missing `gcc-15` or `bc`
+/// otherwise only surfaces ~40 minutes into the build. In `--run` mode a
+/// missing dependency aborts in seconds with the exact install line; in
+/// preview mode it prints the same as a warning without aborting.
+fn preflight_deps(opts: &BuildOpts) -> Result<()> {
+    let required = required_deps(opts);
+    let required_refs: Vec<(&str, &str)> = required
+        .iter()
+        .map(|(bin, pkg)| (bin.as_str(), pkg.as_str()))
+        .collect();
+    let missing = missing_deps(&required_refs, &path_has);
+    if missing.is_empty() {
+        println!("preflight: all build dependencies present");
+        return Ok(());
+    }
+    let msg = missing_deps_message(&missing);
+    if opts.run {
+        bail!("{msg}");
+    }
+    println!("\nWARNING: {msg}");
+    if opts.target.is_some() {
+        println!(
+            "note: the remote target also needs pacman + mkinitcpio (ships by default \
+             on CachyOS); not checked here since the install step runs on the target."
+        );
+    }
+    Ok(())
+}
+
 /// The extract step (makepkg -o). Integrity checks are NOT skipped: a kernel
 /// source that fails its checksums must stop the build, not get patched and
 /// installed anyway.
@@ -499,6 +597,10 @@ pub fn build(opts: BuildOpts) -> Result<()> {
     if !pkgbuild.join("PKGBUILD").exists() {
         bail!("no PKGBUILD in {}", pkgbuild.display());
     }
+    // `makepkg -o --nodeps` / `makepkg -e ... --nodeps` never let pacman check
+    // the kernel build deps, so check them ourselves before any heavy work:
+    // a missing gcc-15 or bc otherwise only surfaces ~40 minutes in.
+    preflight_deps(&opts)?;
     // makepkg refuses root, and arieltune is root-only: when invoked as root
     // the build steps drop to the PKGBUILD dir's owner.
     let drop_uid = resolve_drop_uid(&pkgbuild)?;
@@ -543,10 +645,7 @@ pub fn build(opts: BuildOpts) -> Result<()> {
                  push this arieltune binary, `doctor --json`, assert new kernel + full series"
             );
         }
-        println!(
-            "\nbuild host needs: makepkg, {}, base-devel, ~25 GB free, ~30 min.",
-            opts.cc
-        );
+        println!("\nbuild host needs: ~25 GB free, ~30 min (see preflight result above).");
         return Ok(());
     }
 
@@ -670,6 +769,60 @@ mod tests {
         assert_eq!(s[0], "scp");
         assert_eq!(s.last().unwrap(), "user@host:/tmp/aputune-verify");
         assert!(s.contains(&"/proc/self/exe".to_string()));
+    }
+
+    #[test]
+    fn missing_deps_reports_absent_only() {
+        let required: &[(&str, &str)] = &[
+            ("makepkg", "pacman"),
+            ("gcc-15", "gcc15"),
+            ("g++-15", "gcc15"),
+            ("bc", "bc"),
+            ("patch", "base-devel"),
+            ("make", "base-devel"),
+            ("mkinitcpio", "mkinitcpio"),
+        ];
+        let present = |bin: &str| !matches!(bin, "gcc-15" | "bc");
+        let missing = missing_deps(required, &present);
+        assert_eq!(
+            missing,
+            vec![
+                ("gcc-15".to_string(), "gcc15".to_string()),
+                ("bc".to_string(), "bc".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn install_hint_starts_with_pacman_and_names_packages() {
+        let missing = vec![
+            ("gcc-15".to_string(), "gcc15".to_string()),
+            ("bc".to_string(), "bc".to_string()),
+        ];
+        let hint = install_hint(&missing);
+        assert!(
+            hint.starts_with("sudo pacman -S --needed "),
+            "unexpected hint: {hint}"
+        );
+        assert!(hint.contains("gcc15"), "{hint}");
+        assert!(hint.contains("bc"), "{hint}");
+    }
+
+    #[test]
+    fn required_deps_local_vs_remote() {
+        let local = BuildOpts {
+            target: None,
+            ..Default::default()
+        };
+        let names: Vec<String> = required_deps(&local).into_iter().map(|(b, _)| b).collect();
+        assert!(names.contains(&"mkinitcpio".to_string()));
+
+        let remote = BuildOpts {
+            target: Some("user@host".to_string()),
+            ..Default::default()
+        };
+        let names: Vec<String> = required_deps(&remote).into_iter().map(|(b, _)| b).collect();
+        assert!(!names.contains(&"mkinitcpio".to_string()));
     }
 
     #[test]

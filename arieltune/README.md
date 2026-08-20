@@ -26,6 +26,16 @@ The stock amdgpu driver keeps the BC-250 harvested: 24 CUs, locked clocks. ariel
 
 Build the series against `linux-cachyos-bore-7.0.9`. Not 7.0.11+, which regresses BC-250 SDMA. The series is numbered `01`-`28` (24 applied on a default build, 4 kept on disk but not applied); each diff is explained in `crates/apu/patches/bc250-cachyos-7.0.9/SERIES.md`.
 
+### Build dependencies
+
+Building arieltune itself needs a Rust toolchain (rustup). Building the patched kernel additionally needs `gcc15`, `bc`, and `base-devel` on the build host (`mkinitcpio` ships by default on CachyOS):
+
+```sh
+sudo pacman -S --needed gcc15 bc base-devel
+```
+
+`arieltune apu build` and `arieltune apu liberate` pre-flight-check these before touching anything, and abort in seconds with the exact missing packages instead of failing deep into the ~30 minute build.
+
 ## Quick start
 
 Needs Rust ([rustup.rs](https://rustup.rs)) and sudo.
