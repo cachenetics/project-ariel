@@ -286,13 +286,7 @@ pub const SERIES: &[Patch] = &[
         "amdgpu_ttm.c",
         Tell::Bundled
     ),
-    patch!(
-        "19",
-        "19-bc250-kfd-skip-sdma0.patch",
-        "BC-250 SDMA0 skip — restrict user queues to SDMA1",
-        "SDMA0 loses its completion interrupt at every boot (Fence fallback timer expired on ring sdma0 seen twice). User queues landing on engine 0 spin forever (SDMA=1) or corrupt H2D copies (SDMA=0). This patch clears the even-numbered SDMA queue bits so user queues only use engine 1, leaving engine 0 to the kernel ring. Controlled by amdgpu.bc250_skip_sdma0=1.",        "kfd_device_queue_manager.c",        Tell::ModParam("bc250_skip_sdma0")
-    ),
-    patch!(
+        patch!(
         "20",
         "20-amdgpu-ttm-populate-null-guard.patch",
         "READ_ONCE NULL guard on the TTM *populate* path",
@@ -346,6 +340,32 @@ pub const SERIES: &[Patch] = &[
         "kfd_device_queue_manager.c, kfd_chardev.c, kfd_device_queue_manager.h",
         Tell::ModParam("bc250_flush_by_runlist")
     ),
+patch!(
+        "26",
+        "26-bc250-sdma-firmware-override.patch",
+        "SDMA firmware override (navi10/navi12 blob instead of cyan)",
+        "The cyan_skillfish2 SDMA firmware never drives the user queues \
+         (GabriWar docs/28+29: 0 bytes copied, signal never drops; any other \
+         SDMA 5.0 blob copies 4 MiB in 0.04 s with correct data). This is the \
+         exit strategy for patch 19: validate with HSA_ENABLE_SDMA=1 round \
+         trips, then retire bc250_skip_sdma0. Gated by \
+         amdgpu.bc250_sdma_fw=<base>; empty = stock cyan blob.",
+        "amdgpu_sdma.c",
+        Tell::ModParam("bc250_sdma_fw")
+    ),
+patch!(
+        "27",
+        "27-bc250-early-sdma-trap.patch",
+        "Write SDMA TRAP_ENABLE during gfx_resume",
+        "TRAP_ENABLE is normally written only after amdgpu_device_ip_init() \
+         returns in full, so early SDMA0 fence waits always hit the 500 ms \
+         fallback timer — the two 'Fence fallback timer expired on ring sdma0' \
+         boot lines. Writing the bit in gfx_resume removes them; a readback \
+         log proves the write landed (GabriWar docs/28). Ship together with \
+         patch 26.",
+        "sdma_v5_0.c",
+        Tell::ModParam("bc250_early_sdma_trap")
+    ),
     patch!(
         "28",
         "28-bc250-8core-telemetry.patch",
@@ -383,6 +403,17 @@ pub const ON_DISK: &[Patch] = &[
         Tell::ModParam("bc250_cc_write_mode")
     ),
     patch!(
+        "19",
+        "19-bc250-kfd-skip-sdma0.patch",
+        "BC-250 SDMA0 skip — restrict user queues to SDMA1 (retired)",
+        "Retired from the applied series by 26+27 (navi12 SDMA firmware \
+         override + early TRAP_ENABLE). Kept on disk as the fallback if the \
+         sdma0 engine still misbehaves after the swap — re-arm by moving \
+         back into SERIES and re-adding amdgpu.bc250_skip_sdma0=1.",
+        "kfd_device_queue_manager.c",
+        Tell::ModParam("bc250_skip_sdma0")
+    ),
+    patch!(
         "21",
         "21-amdgpu-gmc-flush-pasid-kiq.patch",
         "KIQ PASID-flush disable (neoney, verified by GabriWar)",
@@ -394,33 +425,7 @@ pub const ON_DISK: &[Patch] = &[
         "gmc_v10_0.c",
         Tell::Bundled
     ),
-    patch!(
-        "26",
-        "26-bc250-sdma-firmware-override.patch",
-        "SDMA firmware override (navi10/navi12 blob instead of cyan)",
-        "The cyan_skillfish2 SDMA firmware never drives the user queues \
-         (GabriWar docs/28+29: 0 bytes copied, signal never drops; any other \
-         SDMA 5.0 blob copies 4 MiB in 0.04 s with correct data). This is the \
-         exit strategy for patch 19: validate with HSA_ENABLE_SDMA=1 round \
-         trips, then retire bc250_skip_sdma0. Gated by \
-         amdgpu.bc250_sdma_fw=<base>; empty = stock cyan blob.",
-        "amdgpu_sdma.c",
-        Tell::ModParam("bc250_sdma_fw")
-    ),
-    patch!(
-        "27",
-        "27-bc250-early-sdma-trap.patch",
-        "Write SDMA TRAP_ENABLE during gfx_resume",
-        "TRAP_ENABLE is normally written only after amdgpu_device_ip_init() \
-         returns in full, so early SDMA0 fence waits always hit the 500 ms \
-         fallback timer — the two 'Fence fallback timer expired on ring sdma0' \
-         boot lines. Writing the bit in gfx_resume removes them; a readback \
-         log proves the write landed (GabriWar docs/28). Ship together with \
-         patch 26.",
-        "sdma_v5_0.c",
-        Tell::ModParam("bc250_early_sdma_trap")
-    ),
-];
+        ];
 
 /// Number of patches in the embedded series.
 pub fn count() -> usize {

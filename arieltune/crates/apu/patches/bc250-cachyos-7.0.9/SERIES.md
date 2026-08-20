@@ -10,12 +10,14 @@ Do **not** build against `7.0.11+` yet - those kernels regress the BC-250 SDMA
 path. The folder is named for the validated kernel (`bc250-cachyos-7.0.9`).
 
 This set is **curated for portability** - only patches that are safe and useful
-on any BC-250 ship, numbered **01-28**. Four patches are on disk but NOT applied,
+on any BC-250 ship, numbered **01-28**. Three patches are on disk but NOT applied,
 in the order listed: `12` (Studebaker's Vulkan-only CU unlock, kept as an
-alternate to `16`), `21` (KIQ PASID-flush disable - superseded by patch
-`14(e)`, which already sets `flush_pasid_uses_kiq = false` for gfx10.1.x),
-`26` and `27` (the SDMA firmware fix and its companion boot trap fix - staged
-for the SDMA validation round, then patch `19` retires). All four are tracked
+alternate to `16`), `19` (SDMA0-skip workaround - RETIRED from the applied
+series by `26`+`27`, kept as the fallback if sdma0 still misbehaves after the
+navi12 firmware swap), and `21` (KIQ PASID-flush disable - superseded by patch
+`14(e)`, which already sets `flush_pasid_uses_kiq = false` for gfx10.1.x).
+`26` (SDMA firmware override, `amdgpu.bc250_sdma_fw=navi12`) and `27` (early
+SDMA TRAP_ENABLE) are ARMED as of 2026-08-19. All on-disk patches are tracked
 in the `aputune` TUI under "on disk, not applied". See "Excluded" below for
 what was deliberately dropped.
 
