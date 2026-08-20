@@ -550,21 +550,21 @@ fn post_extract_plan(
             "set -e; \
              scp {pb_q}/linux-cachyos-*.pkg.tar.zst {tgt}:/tmp/; \
              ssh {tgt} 'sudo pacman -U --noconfirm /tmp/linux-cachyos-*.pkg.tar.zst && \
-               printf \"options amdgpu bc250_cc_write_mode={mode}\\noptions amdgpu bc250_flush_by_runlist=1\\n\" | sudo tee /etc/modprobe.d/aputune-40cu.conf && \
+               printf \"options amdgpu bc250_cc_write_mode={mode}\\noptions amdgpu bc250_flush_by_runlist=1\\noptions amdgpu bc250_sdma_fw=navi12\\noptions amdgpu bc250_early_sdma_trap=1\\n\" | sudo tee /etc/modprobe.d/aputune-40cu.conf && \
                sudo mkinitcpio -P && sudo systemctl reboot'"
         )
     } else {
         format!(
             "set -e; \
              sudo pacman -U --noconfirm {pb_q}/linux-cachyos-*.pkg.tar.zst; \
-             printf 'options amdgpu bc250_cc_write_mode={mode}\\noptions amdgpu bc250_flush_by_runlist=1\\n' | sudo tee /etc/modprobe.d/aputune-40cu.conf; \
+             printf 'options amdgpu bc250_cc_write_mode={mode}\\noptions amdgpu bc250_flush_by_runlist=1\\noptions amdgpu bc250_sdma_fw=navi12\\noptions amdgpu bc250_early_sdma_trap=1\\n' | sudo tee /etc/modprobe.d/aputune-40cu.conf; \
              sudo mkinitcpio -P; \
              echo 'reboot to load the liberated kernel'"
         )
     };
     steps.push(Step {
         desc: format!(
-            "install package + arm cc_write_mode={mode}{} + initramfs{}",
+            "install package + arm cc_write_mode={mode}{} + SDMA(navi12+trap) + initramfs{}",
             if mode == 3 { " (40-CU)" } else { "" },
             opts.target
                 .as_ref()

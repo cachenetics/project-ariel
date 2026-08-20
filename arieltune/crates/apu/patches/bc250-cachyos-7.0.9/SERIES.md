@@ -74,7 +74,8 @@ GabriWar's companion `0002-bc250-rocm-vm-flush.patch` was reviewed and is
   `amdgpu_smu_send_raw` node - GPU `force`/`wake`/`deep-sleep`/`autosleep`.
 - **CPU cclk** (09): soft min/max.
 - **Telemetry** (04/05/11): live clocks, temp, voltages.
-- **SDMA reliability** (19): Steers user SDMA queues off engine 0 to engine 1 (lost completion IRQ). Controlled by amdgpu.bc250_skip_sdma0=1. By Gabriel Duarte Guerra.
+- **SDMA firmware + trap** (26/27): navi12 firmware override for SDMA0 (the cyan blob copies 0 bytes) plus early TRAP_ENABLE in gfx_resume. Armed by default via `amdgpu.bc250_sdma_fw=navi12` + `amdgpu.bc250_early_sdma_trap=1` in the `aputune-40cu.conf` drop-in. By Gabriel Duarte Guerra.
+- **SDMA fallback** (19): retired to on-disk — steers user SDMA queues off engine 0 via `bc250_skip_sdma0=1` if the firmware swap ever needs reverting.
 
 ### CU unlock: patch 12 vs patch 16
 
@@ -121,7 +122,9 @@ Layer 2 (patches 14+15): Bypass dangerous code paths + detect dead GPU
   ├─ amdgpu_gmc_fw_reg_write_reg_wait() → direct MMIO poll loop
   └─ All paths: pre-read health check + 0xFFFFFFFF dead-GPU detection
 
-Layer 3 (patch 19): Steer user DMA away from broken SDMA0. Clear even-numbered SDMA queue bits so user queues use engine 1 only. amdgpu.bc250_skip_sdma0=1 (default off, A/B-testable).
+Layer 3 (patches 26+27): Fix SDMA itself. Override the SDMA firmware to a navi12 blob (the cyan_skillfish2 blob never drives user queues) and write SDMA TRAP_ENABLE during gfx_resume so early fence waits don't hit the 500 ms fallback timer. Armed by default (bc250_sdma_fw=navi12, bc250_early_sdma_trap=1).
+
+Fallback (patch 19, on-disk): steer user DMA away from SDMA0 via `amdgpu.bc250_skip_sdma0=1` — re-arm only if the firmware swap is ever reverted.
 ```
 
 All three layers are gated on `IP_VERSION(10, 1, x)` so they are no-ops on
@@ -247,13 +250,11 @@ The deployed 25-patch build (`snap-8fe794e8`, module `amdgpu.ko` srcversion
 - `amdgpu/Makefile`: the deployed tree does NOT carry patch 22 (`-fno-lto`).
 
 Runtime facts from the blade: `amdgpu.bc250_flush_by_runlist=1`
-(`/etc/modprobe.d/bc250-runlist.conf`), `amdgpu.bc250_skip_sdma0=1`,
-`amdgpu.bc250_cc_write_mode=3`, `modtree=build2`. No SDMA firmware swap —
-the stock cyan_skillfish2 blob is used (GabriWar's docs/29 firmware swap is
-NOT in production; patch 19 is the SDMA workaround). The two
-"Fence fallback timer expired on ring sdma0" boot messages still appear
-(GabriWar's `bc250_early_sdma_trap` fix from his SDMA instrumentation patch
-is not in production).
+(`/etc/modprobe.d/bc250-runlist.conf`), `amdgpu.bc250_cc_write_mode=3`,
+`modtree=build2`. SDMA is on the navi12 firmware override + early trap
+(`bc250_sdma_fw=navi12`, `bc250_early_sdma_trap=1`; patch 19 retired to
+on-disk). Both SDMA rings come up with TRAP_ENABLE=1 and no
+"Fence fallback timer expired" lines on boot.
 
 ## Roadmap — the SDMA exit and what it retires
 
@@ -265,13 +266,19 @@ queues, while navi10/navi12 blobs copy 4 MiB in 0.04 s with correct data
 
 Planned sequence, each step measured before the next:
 
-1. Boot a blade with `amdgpu.bc250_sdma_fw=navi12` (patch 26, opt-in param) and
+1. ~~Boot a blade with `amdgpu.bc250_sdma_fw=navi12` (patch 26, opt-in param) and
    patch 27. Validate: completion signal drops, `torch.equal` on 16 MiB round
-   trips with `HSA_ENABLE_SDMA=1`, magnum bandwidth, RCCL collectives.
-2. Retire patch 19 (`bc250_skip_sdma0=1` off) once SDMA0 is proven.
+   trips with `HSA_ENABLE_SDMA=1`, magnum bandwidth, RCCL collectives.~~
+   **DONE (2026-08-20)**: copy harness 22 × hipMemcpy H2D ≈1.1 GB — ALL COPIES
+   OK, n=2, with the navi12 fw + early trap armed. Note: hipfire's own load
+   path still hangs over SDMA and keeps the CPU-memcpy upload workaround
+   (see hipfire-warpfront-research); the kernel-level SDMA path is proven.
+2. ~~Retire patch 19 (`bc250_skip_sdma0=1` off) once SDMA0 is proven.~~
+   **DONE**: 19 moved to ON_DISK (fallback only).
 3. Re-test `vm_update_mode` (SDMA page-table updates) against the Navi 1x
    invalidation-vs-translation errata in `amdgpu_gmc.c:743`.
-4. Promote 26 + 27 into the applied series.
+4. ~~Promote 26 + 27 into the applied series.~~
+   **DONE**: 26/27 in SERIES, armed by default in the `aputune-40cu.conf` writer.
 
 Known performance work on top of that: the runlist flush (25) currently rebuilds
 on every unmap — coalescing or VA-reuse gating is the next tuning step

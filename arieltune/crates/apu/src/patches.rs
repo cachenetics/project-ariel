@@ -425,7 +425,7 @@ pub const ON_DISK: &[Patch] = &[
         "gmc_v10_0.c",
         Tell::Bundled
     ),
-        ];
+];
 
 /// Number of patches in the embedded series.
 pub fn count() -> usize {
