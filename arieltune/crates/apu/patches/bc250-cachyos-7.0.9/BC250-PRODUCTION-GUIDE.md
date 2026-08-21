@@ -177,10 +177,13 @@ options amdgpu bc250_flush_by_runlist=1
 options amdgpu bc250_sdma_fw=navi12
 options amdgpu bc250_early_sdma_trap=1
 ```
-Fleet-safe arming: if `/lib/firmware/amdgpu/navi12_sdma.bin*` is missing the
-writer skips the `bc250_sdma_fw` line (warn + skip), and patch 26 falls back
-to the stock cyan firmware on a required-load miss instead of failing the
-SDMA probe — so the default is never a hard sdma-init failure.
+Fleet-safe arming: if either `/lib/firmware/amdgpu/navi12_sdma.bin*` or
+`navi12_sdma1.bin*` is missing the writer skips the `bc250_sdma_fw` line
+(warn + skip), and patch 26 falls back to the stock cyan firmware on a
+required-load miss instead of failing the SDMA probe — so the default is
+never a hard sdma-init failure, and the override is never armed when only
+one instance's blob shipped (mixed sdma0=navi12 + sdma1=cyan would put the
+dead cyan engine back on instance 1).
 
 **The mask matters.** `0xfff77ef7` = `0xfff73ef7` (the old production mask) OR'd
 with `PP_OVERDRIVE_MASK` (bit 14, 0x4000). The overdrive bit gates

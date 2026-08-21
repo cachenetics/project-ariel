@@ -550,7 +550,7 @@ fn post_extract_plan(
             "set -e; \
              scp {pb_q}/linux-cachyos-*.pkg.tar.zst {tgt}:/tmp/; \
              ssh {tgt} 'sudo pacman -U --noconfirm /tmp/linux-cachyos-*.pkg.tar.zst && \
-               FW=1; [ -e /lib/firmware/amdgpu/navi12_sdma.bin ] || [ -e /lib/firmware/amdgpu/navi12_sdma.bin.zst ] || {{ FW=0; echo \"WARN: navi12_sdma firmware not found - patch 26 left inert\"; }}; \
+               FW=1; [ -e /lib/firmware/amdgpu/navi12_sdma.bin ] || [ -e /lib/firmware/amdgpu/navi12_sdma.bin.zst ] || FW=0; [ -e /lib/firmware/amdgpu/navi12_sdma1.bin ] || [ -e /lib/firmware/amdgpu/navi12_sdma1.bin.zst ] || FW=0; [ \"$FW\" = 1 ] || echo \"WARN: navi12_sdma firmware incomplete (sdma or sdma1 blob missing) - patch 26 left inert\"; \
                CONF=\"options amdgpu bc250_cc_write_mode={mode}\\noptions amdgpu bc250_flush_by_runlist=1\\n\"; \
                if [ \"$FW\" = 1 ]; then CONF=\"$CONF\"\"options amdgpu bc250_sdma_fw=navi12\\n\"; fi; \
                CONF=\"$CONF\"\"options amdgpu bc250_early_sdma_trap=1\\n\"; \
@@ -561,7 +561,7 @@ fn post_extract_plan(
         format!(
             "set -e; \
              sudo pacman -U --noconfirm {pb_q}/linux-cachyos-*.pkg.tar.zst; \
-             FW=1; [ -e /lib/firmware/amdgpu/navi12_sdma.bin ] || [ -e /lib/firmware/amdgpu/navi12_sdma.bin.zst ] || {{ FW=0; echo 'WARN: navi12_sdma firmware not found - patch 26 left inert'; }}; \
+             FW=1; [ -e /lib/firmware/amdgpu/navi12_sdma.bin ] || [ -e /lib/firmware/amdgpu/navi12_sdma.bin.zst ] || FW=0; [ -e /lib/firmware/amdgpu/navi12_sdma1.bin ] || [ -e /lib/firmware/amdgpu/navi12_sdma1.bin.zst ] || FW=0; [ \"$FW\" = 1 ] || echo 'WARN: navi12_sdma firmware incomplete (sdma or sdma1 blob missing) - patch 26 left inert'; \
              CONF='options amdgpu bc250_cc_write_mode={mode}\\noptions amdgpu bc250_flush_by_runlist=1\\n'; \
              if [ \"$FW\" = 1 ]; then CONF=\"$CONF\"'options amdgpu bc250_sdma_fw=navi12\\n'; fi; \
              CONF=\"$CONF\"'options amdgpu bc250_early_sdma_trap=1\\n'; \

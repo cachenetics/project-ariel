@@ -74,7 +74,7 @@ GabriWar's companion `0002-bc250-rocm-vm-flush.patch` was reviewed and is
   `amdgpu_smu_send_raw` node - GPU `force`/`wake`/`deep-sleep`/`autosleep`.
 - **CPU cclk** (09): soft min/max.
 - **Telemetry** (04/05/11): live clocks, temp, voltages.
-- **SDMA firmware + trap** (26/27): navi12 firmware override for SDMA0 (the cyan blob copies 0 bytes) plus early TRAP_ENABLE in gfx_resume. Armed by default via `amdgpu.bc250_sdma_fw=navi12` + `amdgpu.bc250_early_sdma_trap=1` in the `aputune-40cu.conf` drop-in. Fleet-safe: the writer skips the `bc250_sdma_fw` line when `navi12_sdma*.bin` is absent from `/lib/firmware/amdgpu` (warn+skip), and patch 26 falls back to the stock cyan firmware on a required-load miss instead of failing the SDMA probe. By Gabriel Duarte Guerra.
+- **SDMA firmware + trap** (26/27): navi12 firmware override for SDMA0 (the cyan blob copies 0 bytes) plus early TRAP_ENABLE in gfx_resume. Armed by default via `amdgpu.bc250_sdma_fw=navi12` + `amdgpu.bc250_early_sdma_trap=1` in the `aputune-40cu.conf` drop-in. Fleet-safe: the writer skips the `bc250_sdma_fw` line unless both `navi12_sdma.bin*` and `navi12_sdma1.bin*` are present in `/lib/firmware/amdgpu` (warn+skip), and patch 26 falls back to the stock cyan firmware on a required-load miss instead of failing the SDMA probe. By Gabriel Duarte Guerra.
 - **SDMA fallback** (19): retired to on-disk — steers user SDMA queues off engine 0 via `bc250_skip_sdma0=1` if the firmware swap ever needs reverting.
 
 ### CU unlock: patch 12 vs patch 16
