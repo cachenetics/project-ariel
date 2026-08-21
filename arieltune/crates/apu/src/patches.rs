@@ -286,7 +286,7 @@ pub const SERIES: &[Patch] = &[
         "amdgpu_ttm.c",
         Tell::Bundled
     ),
-        patch!(
+    patch!(
         "20",
         "20-amdgpu-ttm-populate-null-guard.patch",
         "READ_ONCE NULL guard on the TTM *populate* path",
@@ -340,20 +340,23 @@ pub const SERIES: &[Patch] = &[
         "kfd_device_queue_manager.c, kfd_chardev.c, kfd_device_queue_manager.h",
         Tell::ModParam("bc250_flush_by_runlist")
     ),
-patch!(
+    patch!(
         "26",
         "26-bc250-sdma-firmware-override.patch",
-        "SDMA firmware override (navi10/navi12 blob instead of cyan)",
+        "SDMA firmware override (navi12 blob, cyan fallback on miss)",
         "The cyan_skillfish2 SDMA firmware never drives the user queues \
          (GabriWar docs/28+29: 0 bytes copied, signal never drops; any other \
-         SDMA 5.0 blob copies 4 MiB in 0.04 s with correct data). This is the \
-         exit strategy for patch 19: validate with HSA_ENABLE_SDMA=1 round \
-         trips, then retire bc250_skip_sdma0. Gated by \
-         amdgpu.bc250_sdma_fw=<base>; empty = stock cyan blob.",
+         SDMA 5.0 blob copies 4 MiB in 0.04 s with correct data). The exit \
+         strategy for patch 19, armed by default: validated on blade 115 \
+         (2026-08-20, n=2) with HSA_ENABLE_SDMA=1 round trips, 22 copies \
+         ~1.1 GB ALL COPIES OK. If the override blob is missing from \
+         /lib/firmware the request falls back to the stock cyan firmware \
+         instead of failing probe. Gated by amdgpu.bc250_sdma_fw=<base>; \
+         empty = stock cyan blob.",
         "amdgpu_sdma.c",
         Tell::ModParam("bc250_sdma_fw")
     ),
-patch!(
+    patch!(
         "27",
         "27-bc250-early-sdma-trap.patch",
         "Write SDMA TRAP_ENABLE during gfx_resume",

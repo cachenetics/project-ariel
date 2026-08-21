@@ -53,7 +53,7 @@ Active and pinned. Parent: snap-a0af1eeb (19-patch + 24).
 | 23 | `23-gb-addr-config-num-se.patch` | ✅ APPLIED (0x00100044 golden; retracted upstream by GabriWar — re-test candidate) |
 | 24 | `24-gmc-v10-flush-all-vmids.patch` | **All-VMID TLB flush — fixes aliasing bug** |
 | 25 | `25-bc250-flush-tlb-by-runlist.patch` | **Runlist rebuild on unmap — the patch that made PyTorch work** |
-| 26 | `26-bc250-sdma-firmware-override.patch` | ✅ APPLIED — SDMA firmware override (`bc250_sdma_fw=navi12`), armed by default |
+| 26 | `26-bc250-sdma-firmware-override.patch` | ✅ APPLIED — SDMA firmware override (`bc250_sdma_fw=navi12`), armed by default; missing override blob falls back to the stock cyan firmware instead of failing probe |
 | 27 | `27-bc250-early-sdma-trap.patch` | ✅ APPLIED — early TRAP_ENABLE in gfx_resume (`bc250_early_sdma_trap=1`), armed by default |
 
 ---
@@ -177,6 +177,10 @@ options amdgpu bc250_flush_by_runlist=1
 options amdgpu bc250_sdma_fw=navi12
 options amdgpu bc250_early_sdma_trap=1
 ```
+Fleet-safe arming: if `/lib/firmware/amdgpu/navi12_sdma.bin*` is missing the
+writer skips the `bc250_sdma_fw` line (warn + skip), and patch 26 falls back
+to the stock cyan firmware on a required-load miss instead of failing the
+SDMA probe — so the default is never a hard sdma-init failure.
 
 **The mask matters.** `0xfff77ef7` = `0xfff73ef7` (the old production mask) OR'd
 with `PP_OVERDRIVE_MASK` (bit 14, 0x4000). The overdrive bit gates
