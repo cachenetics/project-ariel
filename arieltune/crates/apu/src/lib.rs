@@ -24,8 +24,8 @@
 //! the SMU). The TUI only edits config + (re)starts the systemd unit; the single
 //! `arieltune-gpu.service` daemon is the ONLY SMU clock writer.
 
-mod cpu;
 mod cores;
+mod cpu;
 mod cu;
 mod curoute;
 mod cutest;

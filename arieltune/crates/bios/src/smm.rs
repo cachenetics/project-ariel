@@ -163,7 +163,9 @@ pub fn build() -> io::Result<()> {
         )
         .is_err()
     {
-        eprintln!("warning: could not persist smiflash boot config (boot autoload will be missing)");
+        eprintln!(
+            "warning: could not persist smiflash boot config (boot autoload will be missing)"
+        );
     }
     Ok(())
 }

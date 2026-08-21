@@ -232,9 +232,10 @@ impl OcQ3 {
     /// pair mid-read.
     pub fn core_mask(&self) -> Result<u8> {
         self.smn.lock();
-        let r = self.smn.rreg(CORE_MASK_REG).map_err(|e| {
-            anyhow::anyhow!("core-mask read: SMN I/O failed ({e})")
-        });
+        let r = self
+            .smn
+            .rreg(CORE_MASK_REG)
+            .map_err(|e| anyhow::anyhow!("core-mask read: SMN I/O failed ({e})"));
         self.smn.unlock();
         Ok((r? & 0xFF) as u8)
     }

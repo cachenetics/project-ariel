@@ -476,9 +476,9 @@ mod tests {
         assert_eq!(shape(&[0x1f, 0x0f, 0x03, 0x01]).effective_cu, 12); // 5/4/2/1
         assert_eq!(shape(&[0x1f, 0x1f, 0x01, 0x01]).effective_cu, 8); // 5/5/1/1
         assert_eq!(shape(&[0x0f, 0x0f, 0x0f, 0x0f]).effective_cu, 32); // 4/4/4/4
-        // Discriminators: same four arrays {5,5,1,1}, engine grouping decides.
-        // 5/1/5/1 splits the small arrays across engines (both SE = 6 WGP) -> 24;
-        // 5/5/1/1 stacks them in SE1 (SE1 = 2 WGP) -> 8. Measured 1058 vs 357.
+                                                                       // Discriminators: same four arrays {5,5,1,1}, engine grouping decides.
+                                                                       // 5/1/5/1 splits the small arrays across engines (both SE = 6 WGP) -> 24;
+                                                                       // 5/5/1/1 stacks them in SE1 (SE1 = 2 WGP) -> 8. Measured 1058 vs 357.
         assert_eq!(shape(&[0x1f, 0x01, 0x1f, 0x01]).effective_cu, 24); // 5/1/5/1
         assert!(!shape(&[0x1f, 0x01, 0x1f, 0x01]).unbalanced); // engines even
         assert!(shape(&[0x1f, 0x1f, 0x01, 0x01]).unbalanced); // engines skewed

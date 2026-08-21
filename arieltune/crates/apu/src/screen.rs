@@ -766,7 +766,8 @@ fn handle_key(app: &mut ApuScreen, key: KeyEvent) -> Outcome {
     let code = key.code;
     // While modal (popup open OR mid-edit) the pane owns every key — never leak
     // to the shell's global bindings.
-    let is_modal = app.patch_popup.is_some() || app.core_force_confirm || matches!(app.edit, Edit::Value(_));
+    let is_modal =
+        app.patch_popup.is_some() || app.core_force_confirm || matches!(app.edit, Edit::Value(_));
     if !is_modal {
         // The shell's global keys reach it only via Ignored: modified keys
         // (Ctrl-Q quit, Ctrl-Tab cycle, Alt-1..4 jump), the function keys (F1-F4),
@@ -1711,7 +1712,10 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
     let intro = Style::default().fg(DIM);
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            format!(" The curated {}-patch amdgpu series arieltune embeds and builds into", patches::count()),
+            format!(
+                " The curated {}-patch amdgpu series arieltune embeds and builds into",
+                patches::count()
+            ),
             intro,
         )),
         Line::from(Span::styled(
@@ -1775,9 +1779,7 @@ fn patch_popup_lines(states: &[State]) -> Vec<Line<'static>> {
                  inventory is visible; `aputune build` does not apply them.",
                 patches::ON_DISK.len()
             ),
-            Style::default()
-                .fg(ACCENT)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         )]));
         lines.push(Line::from(""));
         for p in patches::ON_DISK {
@@ -1868,10 +1870,7 @@ fn draw_core_force_popup(f: &mut Frame, app: &ApuScreen) {
                 "[esc] cancel  ",
                 Style::default().fg(WARN).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "nothing is written.",
-                Style::default().fg(DIM),
-            ),
+            Span::styled("nothing is written.", Style::default().fg(DIM)),
         ]),
     ];
     let inner = block.inner(rect);
@@ -2575,9 +2574,7 @@ fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
         crate::cores::CoreState::PendingReboot => {
             (Style::default().fg(WARN), " · warm reboot needed")
         }
-        crate::cores::CoreState::Abnormal(_) => {
-            (Style::default().fg(BAD), " · writes refused")
-        }
+        crate::cores::CoreState::Abnormal(_) => (Style::default().fg(BAD), " · writes refused"),
     };
     let title = Line::from(vec![
         Span::styled(
@@ -2619,7 +2616,12 @@ fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
         .cores_report
         .as_ref()
         .and_then(|l| l.last())
-        .map(|v| Line::from(Span::styled(format!(" verify: {v}"), Style::default().fg(WARN))))
+        .map(|v| {
+            Line::from(Span::styled(
+                format!(" verify: {v}"),
+                Style::default().fg(WARN),
+            ))
+        })
         .unwrap_or_else(|| keys.clone());
 
     // Per-core thread glyphs: both threads -> ██, mixed -> █·, none -> ··.
@@ -2629,7 +2631,11 @@ fn draw_cores(f: &mut Frame, area: Rect, app: &ApuScreen, focused: bool) {
             .iter()
             .find(|(c, _)| *c == core)
             .map(|(_, v)| v.as_slice());
-        let on = |i: usize| cpus.and_then(|v| v.get(i)).map(|(_, on)| *on).unwrap_or(false);
+        let on = |i: usize| {
+            cpus.and_then(|v| v.get(i))
+                .map(|(_, on)| *on)
+                .unwrap_or(false)
+        };
         match (cpus.is_some(), on(0), on(1)) {
             (true, true, true) => ("██", GOOD),
             (true, true, false) | (true, false, true) => ("█·", WARN),

@@ -60,8 +60,7 @@ impl Report {
     /// production kernels.
     pub fn fully_patched(&self) -> bool {
         self.rows.iter().all(|r| {
-            patches::OPTIONAL.contains(&r.id)
-                || matches!(r.state, State::Present | State::Inferred)
+            patches::OPTIONAL.contains(&r.id) || matches!(r.state, State::Present | State::Inferred)
         })
     }
 
@@ -70,9 +69,7 @@ impl Report {
     pub fn missing(&self) -> Vec<&PatchStatus> {
         self.rows
             .iter()
-            .filter(|r| {
-                r.state == State::Absent && !patches::OPTIONAL.contains(&r.id)
-            })
+            .filter(|r| r.state == State::Absent && !patches::OPTIONAL.contains(&r.id))
             .collect()
     }
 }
