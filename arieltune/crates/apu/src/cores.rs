@@ -112,7 +112,11 @@ pub struct CoreSnapshot {
 /// dir and the `online` file, so this is the recovery-safe enumeration.
 pub fn cpu_dirs() -> Vec<u32> {
     let mut cpus: Vec<u32> = Vec::new();
-    for e in fs::read_dir("/sys/devices/system/cpu").into_iter().flatten().flatten() {
+    for e in fs::read_dir("/sys/devices/system/cpu")
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         let name = e.file_name().to_string_lossy().into_owned();
         if let Some(n) = name.strip_prefix("cpu") {
             if let Ok(n) = n.parse::<u32>() {
@@ -170,7 +174,11 @@ fn cpu_is_online(cpu: u32) -> bool {
 fn thread_counts() -> (u32, u32) {
     let mut total = 0u32;
     let mut off = 0u32;
-    for e in fs::read_dir("/sys/devices/system/cpu").into_iter().flatten().flatten() {
+    for e in fs::read_dir("/sys/devices/system/cpu")
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         let name = e.file_name().to_string_lossy().into_owned();
         if let Some(n) = name.strip_prefix("cpu") {
             if n.parse::<u32>().is_ok() {
@@ -259,7 +267,9 @@ pub fn status() -> Result<()> {
     println!("SMN 0x115A870 = {}", describe_mask(s.mask));
     println!("state: {}", s.state.label());
     match s.state {
-        CoreState::Locked => println!("stock 6 cores / 12 threads — run 'aputune cores apply' to unlock"),
+        CoreState::Locked => {
+            println!("stock 6 cores / 12 threads — run 'aputune cores apply' to unlock")
+        }
         CoreState::Unlocked => println!("all 8 cores / 16 threads active"),
         CoreState::PendingReboot => {
             println!("mask is set but the firmware has not re-enumerated yet — warm reboot needed")
@@ -310,8 +320,12 @@ pub fn apply(warm_reboot: bool, force_abnormal: bool) -> Result<()> {
             println!("already unlocked, nothing to do");
         }
         CoreUnlock::Unlocked => {
-            println!("mask written and verified 0xFF — all 8 cores will appear after a WARM reboot");
-            println!("a cold boot (power removed) reverts to 6 cores; the boot unit re-applies the mask");
+            println!(
+                "mask written and verified 0xFF — all 8 cores will appear after a WARM reboot"
+            );
+            println!(
+                "a cold boot (power removed) reverts to 6 cores; the boot unit re-applies the mask"
+            );
             println!("WARNING: the SoC power/thermal envelope changes with 2 extra cores — re-validate any CPU OC/undervolt and GPU VDDC settings");
             if warm_reboot {
                 set_warm_reboot();
@@ -376,10 +390,7 @@ pub fn install() -> Result<()> {
          WantedBy=multi-user.target\n"
     );
     fs::write(UNIT_PATH, unit).context("write unit file")?;
-    for args in [
-        &["daemon-reload"][..],
-        &["enable", UNIT_NAME][..],
-    ] {
+    for args in [&["daemon-reload"][..], &["enable", UNIT_NAME][..]] {
         let st = Command::new("systemctl").args(args).status()?;
         if !st.success() {
             bail!("systemctl {} failed ({st})", args.join(" "));
@@ -426,8 +437,7 @@ fn set_core_online(core: u32, online: bool) -> Result<u32> {
     for cpu in &cpus {
         let p = format!("/sys/devices/system/cpu/cpu{cpu}/online");
         if Path::new(&p).exists() {
-            fs::write(&p, if online { "1" } else { "0" })
-                .with_context(|| format!("write {p}"))?;
+            fs::write(&p, if online { "1" } else { "0" }).with_context(|| format!("write {p}"))?;
             touched += 1;
         }
     }
@@ -482,9 +492,7 @@ pub fn online(core: Option<u32>) -> Result<()> {
                 }
             }
             let (threads, offline) = thread_counts();
-            println!(
-                "all cpus online — now {threads} threads visible, {offline} offline"
-            );
+            println!("all cpus online — now {threads} threads visible, {offline} offline");
         }
     }
     Ok(())
@@ -497,7 +505,15 @@ pub fn online(core: Option<u32>) -> Result<()> {
 fn stress_one(cpu: u32, seconds: u64) -> (Option<f64>, Option<u64>, Option<u64>) {
     let out = Command::new("taskset")
         .args(["-c", &cpu.to_string()])
-        .args(["stress-ng", "--cpu", "1", "--cpu-method", "all", "--verify", "--metrics-brief"])
+        .args([
+            "stress-ng",
+            "--cpu",
+            "1",
+            "--cpu-method",
+            "all",
+            "--verify",
+            "--metrics-brief",
+        ])
         .args(["-t", &format!("{seconds}s")])
         .output();
     let Ok(out) = out else {
@@ -544,7 +560,9 @@ pub fn sweep_lines(seconds: u64) -> Result<Vec<String>> {
         let tag = if *core == 3 || *core == 7 { "NEW" } else { "" };
         let fail = failed.unwrap_or(0);
         if fail > 0 {
-            problems.push(format!("core {core}: {fail} verify failures (wrong results)"));
+            problems.push(format!(
+                "core {core}: {fail} verify failures (wrong results)"
+            ));
         }
         if let Some(r) = rate {
             rates.push((*core, r));
@@ -553,7 +571,8 @@ pub fn sweep_lines(seconds: u64) -> Result<Vec<String>> {
             "{:<4} {:<4} {:>12} {:>8} {:>7}  {}",
             core,
             cpu,
-            rate.map(|r| format!("{r:.0}")).unwrap_or_else(|| "?".into()),
+            rate.map(|r| format!("{r:.0}"))
+                .unwrap_or_else(|| "?".into()),
             passed.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
             failed.map(|f| f.to_string()).unwrap_or_else(|| "?".into()),
             tag
@@ -565,13 +584,20 @@ pub fn sweep_lines(seconds: u64) -> Result<Vec<String>> {
         out.push(format!("deviation from median ({med:.0} bogo-ops/s):"));
         for (core, r) in &rates {
             let pct = (r - med) / med * 100.0;
-            let tag = if *core == 3 || *core == 7 { "   <-- NEW" } else { "" };
+            let tag = if *core == 3 || *core == 7 {
+                "   <-- NEW"
+            } else {
+                ""
+            };
             out.push(format!("  core {core}: {r:>10.0}  ({pct:+.1}%){tag}"));
         }
     }
     out.push(format!("MCE entries in dmesg: {}", mce_count()));
     if problems.is_empty() {
-        out.push("verdict: no verify failures observed (advisory only — this never gates anything)".into());
+        out.push(
+            "verdict: no verify failures observed (advisory only — this never gates anything)"
+                .into(),
+        );
     } else {
         out.push(format!("verdict: PROBLEMS — {}", problems.join("; ")));
         out.push("  a core that fails --verify produces WRONG results. Do not use it.".into());
@@ -593,7 +619,10 @@ pub fn verify(seconds: u64) -> Result<()> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let _ = fs::write(format!("{REPORT_DIR}/cores-verify-{ts}.txt"), lines.join("\n"));
+    let _ = fs::write(
+        format!("{REPORT_DIR}/cores-verify-{ts}.txt"),
+        lines.join("\n"),
+    );
     Ok(())
 }
 
@@ -640,7 +669,10 @@ pub fn acpi_status() -> Result<()> {
     let objs = if cst.exists() { cst_objects(&cst) } else { 0 };
     println!("logical threads: {}", s.threads);
     println!("cpus without idle states: {no_idle}");
-    println!("installed CST processor objects: {objs} ({} installed)", if cst.exists() { "override" } else { "none" });
+    println!(
+        "installed CST processor objects: {objs} ({} installed)",
+        if cst.exists() { "override" } else { "none" }
+    );
     if no_idle > 0 && s.threads > 12 {
         println!("hint: threads 12-15 lack C-states — 'aputune cores acpi install' fixes this");
     }
@@ -650,7 +682,9 @@ pub fn acpi_status() -> Result<()> {
 /// `aputune cores acpi install` — stage the 8-core tables + rebuild initramfs.
 pub fn acpi_install() -> Result<()> {
     if !Path::new(MKINITCPIO_CONF).exists() {
-        bail!("{MKINITCPIO_CONF} not found — initcpio ACPI override needs it (Arch-family initramfs)");
+        bail!(
+            "{MKINITCPIO_CONF} not found — initcpio ACPI override needs it (Arch-family initramfs)"
+        );
     }
     fs::create_dir_all(ACPI_OVERRIDE_DIR).context("mkdir acpi override")?;
     fs::create_dir_all(ACPI_BACKUP_DIR).context("mkdir acpi backup")?;
@@ -689,12 +723,13 @@ pub fn acpi_install() -> Result<()> {
                 .split_whitespace()
                 .collect();
             // Insert before the last hook (usually filesystems/encrypt...).
-            let insert_at = hooks.len().saturating_sub(1).min(if hooks.is_empty() { 0 } else { hooks.len() - 1 });
+            let insert_at = hooks.len().saturating_sub(1).min(if hooks.is_empty() {
+                0
+            } else {
+                hooks.len() - 1
+            });
             hooks.insert(insert_at, "acpi_override");
-            new_conf = new_conf.replace(
-                hooks_line,
-                &format!("HOOKS=({})", hooks.join(" ")),
-            );
+            new_conf = new_conf.replace(hooks_line, &format!("HOOKS=({})", hooks.join(" ")));
         } else {
             bail!("no HOOKS= line in {MKINITCPIO_CONF}");
         }

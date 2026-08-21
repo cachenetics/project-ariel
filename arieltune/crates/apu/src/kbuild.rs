@@ -161,8 +161,7 @@ fn drop_uid_for(euid: u32, owner_uid: u32) -> Option<u32> {
 
 fn resolve_drop_uid(pkgbuild: &Path) -> Result<Option<u32>> {
     let euid = unsafe { libc::geteuid() };
-    let md = fs::metadata(pkgbuild)
-        .with_context(|| format!("stat {}", pkgbuild.display()))?;
+    let md = fs::metadata(pkgbuild).with_context(|| format!("stat {}", pkgbuild.display()))?;
     use std::os::unix::fs::MetadataExt;
     let owner = md.uid();
     if euid == 0 && owner == 0 {
@@ -611,8 +610,7 @@ pub fn build(opts: BuildOpts) -> Result<()> {
     } else {
         opts.work_dir.clone()
     };
-    fs::create_dir_all(&work_dir)
-        .with_context(|| format!("mkdir {}", work_dir.display()))?;
+    fs::create_dir_all(&work_dir).with_context(|| format!("mkdir {}", work_dir.display()))?;
     let patch_dir = materialize_patches(&work_dir)?;
     if let Some(uid) = drop_uid {
         chown_recursive(&work_dir, uid)?;
@@ -741,8 +739,13 @@ mod tests {
             pkgbuild_dir: Some(PathBuf::from("/tmp/pkg")),
             ..Default::default()
         };
-        let steps =
-            post_extract_plan(&opts, Path::new("/tmp/patches"), Path::new("/tmp/src"), None).unwrap();
+        let steps = post_extract_plan(
+            &opts,
+            Path::new("/tmp/patches"),
+            Path::new("/tmp/src"),
+            None,
+        )
+        .unwrap();
         let patch_steps: Vec<_> = steps.iter().filter(|s| s.argv[0] == "patch").collect();
         assert_eq!(patch_steps.len(), patches::count());
         for s in patch_steps {
@@ -828,12 +831,10 @@ mod tests {
     #[test]
     fn doctor_json_parsing() {
         let n = patches::count();
-        let d = parse_doctor_json(
-            &format!(
-                "{{\"is_bc250\":true,\"kernel\":\"6.12.4-aputune\",\"present\":{n},\
+        let d = parse_doctor_json(&format!(
+            "{{\"is_bc250\":true,\"kernel\":\"6.12.4-aputune\",\"present\":{n},\
                  \"total\":{n},\"fully\":true}}\n"
-            ),
-        )
+        ))
         .unwrap();
         assert!(d.is_bc250);
         assert_eq!(d.kernel, "6.12.4-aputune");
