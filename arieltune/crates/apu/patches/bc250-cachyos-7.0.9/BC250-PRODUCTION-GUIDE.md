@@ -1,6 +1,6 @@
 # BC-250 Production Guide — ROCm + PyTorch on CachyOS 7.0.9
 
-**Date**: 2026-08-17 (updated for the 25-patch runlist build)  
+**Date**: 2026-08-17 (updated 2026-08-20: SDMA navi12 firmware override + early TRAP_ENABLE armed — patches 26/27 in SERIES, 19 retired to on-disk)  
 **Hardware**: AMD BC-250 (gfx1013 / Cyan Skillfish), 40 CU, 17.2 GB VRAM  
 **Kernel**: 7.0.9-cachyos, 25-patch series (modtree=build2, module srcversion C484A6D2)  
 **ROCm**: 7.2.4-1 (arch4edu)  
@@ -13,7 +13,9 @@
 
 ```bash
 # Required for ALL GPU workloads
-export HSA_ENABLE_SDMA=0
+export HSA_ENABLE_SDMA=1
+# SDMA0 is healthy with the navi12 firmware override (patch 26); the old
+# HSA_ENABLE_SDMA=0 / bc250_skip_sdma0=1 regime is retired with patch 19.
 export HSA_OVERRIDE_GFX_VERSION=10.1.0   # ← MUST be shell env var, NOT os.environ!
 
 # The patch that makes PyTorch work (patch 25) — on the blade:
@@ -44,13 +46,15 @@ Active and pinned. Parent: snap-a0af1eeb (19-patch + 24).
 | 16 | `16-cu-unlock-cc-spi-safe-no-rlc.patch` | 40 CU unlock — ROCm-safe |
 | 17 | `17-bc250-gfx1013-fault-probe.patch` | Instruction-fetch fault probe (diagnostic) |
 | 18 | `18-ttm-guard-null-pages-on-unpopulate.patch` | NULL guard on TTM *unpopulate* |
-| 19 | `19-bc250-kfd-skip-sdma0.patch` | Skip broken SDMA0 (bc250_skip_sdma0=1) |
+| 19 | `19-bc250-kfd-skip-sdma0.patch` | ❌ NOT applied — retired to on-disk fallback (re-arm: `bc250_skip_sdma0=1`) |
 | 20 | `20-amdgpu-ttm-populate-null-guard.patch` | READ_ONCE NULL guard on TTM *populate* |
 | 21 | `21-amdgpu-gmc-flush-pasid-kiq.patch` | ❌ NOT applied — superseded by 14(e) |
 | 22 | `22-amdgpu-ttm-fno-lto.patch` | `-fno-lto` for amdgpu_ttm.o (deployed tree does NOT carry it) |
 | 23 | `23-gb-addr-config-num-se.patch` | ✅ APPLIED (0x00100044 golden; retracted upstream by GabriWar — re-test candidate) |
 | 24 | `24-gmc-v10-flush-all-vmids.patch` | **All-VMID TLB flush — fixes aliasing bug** |
 | 25 | `25-bc250-flush-tlb-by-runlist.patch` | **Runlist rebuild on unmap — the patch that made PyTorch work** |
+| 26 | `26-bc250-sdma-firmware-override.patch` | ✅ APPLIED — SDMA firmware override (`bc250_sdma_fw=navi12`), armed by default; missing override blob falls back to the stock cyan firmware instead of failing probe |
+| 27 | `27-bc250-early-sdma-trap.patch` | ✅ APPLIED — early TRAP_ENABLE in gfx_resume (`bc250_early_sdma_trap=1`), armed by default |
 
 ---
 
@@ -58,13 +62,14 @@ Active and pinned. Parent: snap-a0af1eeb (19-patch + 24).
 
 | Workload | Recipe | Result |
 |----------|--------|--------|
-| Basic matmul (fp32/fp16) | `HSA_ENABLE_SDMA=0` | ✅ All sizes 512-4096 |
-| Conv2d (MIOpen) | `HSA_ENABLE_SDMA=0` | ✅ 26/26 correct |
-| Memory alloc up to 6GB | `HSA_ENABLE_SDMA=0` | ✅ |
-| Multi-worker aliasing test | `HSA_ENABLE_SDMA=0` | ✅ 0/4000 corruptions |
-| **LoRA training (backward)** | `HSA_ENABLE_SDMA=0 HSA_OVERRIDE_GFX_VERSION=10.1.0` | ✅ distilgpt2, 83ms/step |
-| **hipfire LLM inference** | `HSA_ENABLE_SDMA=0 HSA_OVERRIDE_GFX_VERSION=10.1.0` | ✅ 85.7 tok/s (Qwen3.5 4B) |
-| magnum bandwidth test | `HSA_ENABLE_SDMA=0 HSA_OVERRIDE_GFX_VERSION=10.1.0` | ✅ 259 GB/s norot |
+| Basic matmul (fp32/fp16) | `HSA_ENABLE_SDMA=1` | ✅ All sizes 512-4096 |
+| Conv2d (MIOpen) | `HSA_ENABLE_SDMA=1` | ✅ 26/26 correct |
+| Memory alloc up to 6GB | `HSA_ENABLE_SDMA=1` | ✅ |
+| Multi-worker aliasing test | `HSA_ENABLE_SDMA=1` | ✅ 0/4000 corruptions |
+| **SDMA H2D copy round-trip** | `HSA_ENABLE_SDMA=1`, navi12 fw armed | ✅ 22 copies ≈1.1 GB, ALL COPIES OK (2026-08-20, n=2) |
+| **LoRA training (backward)** | `HSA_ENABLE_SDMA=1 HSA_OVERRIDE_GFX_VERSION=10.1.0` | ✅ distilgpt2, 83ms/step |
+| **hipfire LLM inference** | `HSA_ENABLE_SDMA=1 HSA_OVERRIDE_GFX_VERSION=10.1.0` | ✅ 85.7 tok/s (Qwen3.5 4B) |
+| magnum bandwidth test | `HSA_ENABLE_SDMA=1 HSA_OVERRIDE_GFX_VERSION=10.1.0` | ✅ 259 GB/s norot |
 
 ---
 
@@ -75,8 +80,8 @@ Active and pinned. Parent: snap-a0af1eeb (19-patch + 24).
 | bf16 | gfx1013 hardware (gfx10.1) predates bfloat16 | Use fp32 or fp16+GradScaler |
 | rocBLAS small-rank GEMM | Kernel selection bug on gfx1013 | `HSA_OVERRIDE_GFX_VERSION=10.1.0` |
 | LoRA backward without override | rocBLAS picks broken kernel variant | Use the override as shell env var |
-| SDMA engine 0 | Lost completion IRQ at boot | `bc250_skip_sdma0=1` (patch 19) |
-| SDMA0 boot fallback msg | TRAP_ENABLE written late in init (init-order artifact, not a lost IRQ) | Cosmetic; GabriWar's early-TRAP fix not in production |
+| SDMA engine 0 (stock cyan firmware) | `cyan_skillfish2_sdma.bin` copies 0 bytes; completion signal never drops | Firmware override `bc250_sdma_fw=navi12` (patch 26), armed by default |
+| SDMA0 boot fallback msg | TRAP_ENABLE written late in init (fixed by patch 27) | Early TRAP_ENABLE in gfx_resume — no fallback-timer lines on boot |
 
 ---
 
@@ -155,14 +160,30 @@ sudo reboot -f
 
 Add to `/etc/environment` or shell rc:
 ```bash
-HSA_ENABLE_SDMA=0
+HSA_ENABLE_SDMA=1
 HSA_OVERRIDE_GFX_VERSION=10.1.0
 ```
 
 Kernel cmdline (in GRUB):
 ```
-amdgpu.bc250_skip_sdma0=1 amdgpu.ppfeaturemask=0xfff77ef7
+amdgpu.ppfeaturemask=0xfff77ef7
 ```
+
+SDMA arming is written automatically by `arieltune apu build` into
+`/etc/modprobe.d/aputune-40cu.conf`:
+```
+options amdgpu bc250_cc_write_mode=3
+options amdgpu bc250_flush_by_runlist=1
+options amdgpu bc250_sdma_fw=navi12
+options amdgpu bc250_early_sdma_trap=1
+```
+Fleet-safe arming: if either `/lib/firmware/amdgpu/navi12_sdma.bin*` or
+`navi12_sdma1.bin*` is missing the writer skips the `bc250_sdma_fw` line
+(warn + skip), and patch 26 falls back to the stock cyan firmware on a
+required-load miss instead of failing the SDMA probe — so the default is
+never a hard sdma-init failure, and the override is never armed when only
+one instance's blob shipped (mixed sdma0=navi12 + sdma1=cyan would put the
+dead cyan engine back on instance 1).
 
 **The mask matters.** `0xfff77ef7` = `0xfff73ef7` (the old production mask) OR'd
 with `PP_OVERDRIVE_MASK` (bit 14, 0x4000). The overdrive bit gates

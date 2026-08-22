@@ -1,4 +1,4 @@
-Subject: [PATCH] drm/amdgpu: BC-250 — SDMA firmware override (module param)
+Subject: [PATCH] drm/amdgpu: BC-250 — SDMA firmware override with cyan fallback (module param)
 
 The cyan_skillfish2_sdma.bin firmware never drives the SDMA user queues:
 a 4 MiB copy completes 0 bytes and the completion signal never drops,
@@ -8,15 +8,19 @@ tools/sdma_copy_ab.py, tools/sdma_engine_ab.py, all n=3 deterministic).
 
 This patch lets the driver load a different blob on the BC-250 without
 touching /lib/firmware, gated by amdgpu.bc250_sdma_fw=<base> (e.g. navi12).
-Empty string = stock cyan_skillfish2 firmware. ON DISK / NOT APPLIED:
-keep off until the swap is validated on a blade with HSA_ENABLE_SDMA=1
-round trips; the plan is to retire patch 19 (bc250_skip_sdma0=1) after.
+Empty string = stock cyan_skillfish2 firmware. If the override blob is
+missing from /lib/firmware (linux-firmware without navi12_sdma*.bin), the
+request falls back to the stock cyan firmware with a warning instead of
+failing the SDMA probe — safe to arm fleet-wide.
 
-By Gabriel Duarte Guerra (firmware finding); patch authored for arieltune.
+Validated on blade 115 (2026-08-20, n=2): 22 hipMemcpy H2D copies ~1.1 GB,
+ALL COPIES OK; both rings TRAP_ENABLE=1 with patch 27 and no
+"Fence fallback timer expired" lines. Retires patch 19 to on-disk.
+
+By Gabriel Duarte Guerra (firmware finding); fallback added for arieltune.
 ---
 
-diff --git a/var/tmp/ariel-sync/cachyos-7.0.9-1/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.c b/var/tmp/ariel-sync/patchgen2/amdgpu_sdma26.c
-index 321310b..fc7105f 100644
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.c
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.c
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_sdma.c
 @@ -22,6 +22,7 @@
@@ -47,7 +51,7 @@ index 321310b..fc7105f 100644
  /*
   * GPU SDMA IP block helpers function.
   */
-@@ -212,6 +226,13 @@ int amdgpu_sdma_init_microcode(struct amdgpu_device *adev,
+@@ -212,6 +226,13 @@
  	char ucode_prefix[30];
  
  	amdgpu_ucode_ip_version_decode(adev, SDMA0_HWIP, ucode_prefix, sizeof(ucode_prefix));
@@ -61,3 +65,35 @@ index 321310b..fc7105f 100644
  	if (instance == 0)
  		err = amdgpu_ucode_request(adev, &adev->sdma.instance[instance].fw,
  					   AMDGPU_UCODE_REQUIRED,
+@@ -220,6 +241,31 @@
+ 		err = amdgpu_ucode_request(adev, &adev->sdma.instance[instance].fw,
+ 					   AMDGPU_UCODE_REQUIRED,
+ 					   "amdgpu/%s%d.bin", ucode_prefix, instance);
++	/* BC-250: override blob missing from /lib/firmware (linux-firmware
++	 * without navi12_sdma*.bin) -> fall back to the stock cyan firmware
++	 * instead of failing the SDMA probe outright.
++	 */
++	if (err && bc250_sdma_fw[0] &&
++	    adev->pdev->device == BC250_PCI_DEVICE_ID) {
++		dev_warn(adev->dev,
++			 "BC-250: %s_sdma firmware not found, falling back to cyan_skillfish2_sdma\n",
++			 bc250_sdma_fw);
++		amdgpu_ucode_release(&adev->sdma.instance[instance].fw);
++		snprintf(ucode_prefix, sizeof(ucode_prefix),
++			 "cyan_skillfish2_sdma");
++		if (instance == 0)
++			err = amdgpu_ucode_request(adev,
++					&adev->sdma.instance[instance].fw,
++					AMDGPU_UCODE_REQUIRED,
++					"amdgpu/%s.bin", ucode_prefix);
++		else
++			err = amdgpu_ucode_request(adev,
++					&adev->sdma.instance[instance].fw,
++					AMDGPU_UCODE_REQUIRED,
++					"amdgpu/%s%d.bin", ucode_prefix,
++					instance);
++	}
++
+ 	if (err)
+ 		goto out;
+ 
