@@ -24,23 +24,76 @@ The unified BC-250 tuning suite. One tabbed TUI, with a matching CLI, over four 
 
 The stock amdgpu driver keeps the BC-250 harvested: 24 CUs, locked clocks. arieltune ships a curated amdgpu kernel patch series that unlocks all 40 CUs, adds race-free SMU clock control, CPU clock limits, and live telemetry. It drives the whole kernel build and install for you: roughly a 30 minute build plus a reboot, always previewed first, and it only acts with `--run`.
 
-Build the series against `linux-cachyos-bore-7.0.9`. Not 7.0.11+, which regresses BC-250 SDMA. The series is numbered `01`-`28` (24 applied on a default build, 4 kept on disk but not applied); each diff is explained in `crates/apu/patches/bc250-cachyos-7.0.9/SERIES.md`.
+Build the series against `linux-cachyos` 7.0.9-1 (the plain `linux-cachyos/` PKGBUILD dir). Not 7.0.11+, which regresses BC-250 SDMA. The series lives in `crates/apu/patches/bc250-cachyos-7.0.9/`; every diff and what it does is explained in `SERIES.md` (patches that are on disk but not applied are marked there).
 
 ### Build dependencies
 
-Building arieltune itself needs a Rust toolchain (rustup). Building the patched kernel additionally needs `gcc15`, `bc`, `base-devel`, the clang + thinLTO toolchain (`clang`, `llvm`, `lld`, `pahole`), and the kernel-Rust pieces (`rust`, `rust-bindgen`, `rust-src` — the shipped 7.0.9 config has `CONFIG_RUST=y`) on the build host (`mkinitcpio` ships by default on CachyOS):
+On Arch/CachyOS the distro Rust toolchain is enough — no rustup needed. On other
+distros, install Rust via [rustup.rs](https://rustup.rs) first. The patched-kernel
+build then needs `gcc15`, `bc`, `base-devel`, the clang + thinLTO toolchain
+(`clang`, `llvm`, `lld`, `pahole`), and the kernel-Rust pieces (`rust`,
+`rust-bindgen`, `rust-src` — the shipped 7.0.9 config has `CONFIG_RUST=y`).
+`mkinitcpio` ships by default on CachyOS:
 
 ```sh
 sudo pacman -S --needed gcc15 bc base-devel clang llvm lld pahole rust rust-bindgen rust-src
 ```
 
-`arieltune apu build` and `arieltune apu liberate` pre-flight-check these before touching anything, and abort in seconds with the exact missing packages instead of failing deep into the ~30 minute build.
+`arieltune apu build` pre-flight-checks the toolchain before touching anything and
+aborts in seconds with the exact missing packages instead of failing deep into the
+~30 minute build.
 
-The build also gates on the BIOS **UMA frame buffer size = 512M**. A different carve (e.g. 2G) breaks IP discovery (`invalid ip discovery binary signature`) and every PSP firmware load (`LOAD_IP_FW ... 0xFFFF0008`) — failures that look like patch bugs. The preflight reads the live carve and aborts the build with the BIOS fix.
+### Liberation quick start (patched kernel)
+
+The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
+
+1. **BIOS**: set *UMA Frame Buffer Size* to **512M**. A different carve (e.g. 2G)
+   breaks IP discovery and every PSP firmware load (`LOAD_IP_FW ... 0xFFFF0008`) —
+   failures that look like patch bugs. The preflight reads the live carve and
+   blocks the build until the BIOS is fixed.
+
+2. **Pin the linux-cachyos PKGBUILD** (arieltune cannot fetch this itself):
+
+   ```sh
+   git clone https://github.com/CachyOS/linux-cachyos.git ~/linux-cachyos
+   git -C ~/linux-cachyos checkout 791fb8ea6d3cf7c85e596678c25c56fa140591be   # 7.0.9-1
+   ```
+
+3. **Arm the fleet kernel command line** (GRUB). Without it the PSP rejects every
+   firmware load and most patch features report dead:
+
+   ```sh
+   sudo sed -i 's|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT="nowatchdog nvme_load=YES splash loglevel=3 amdgpu.ppfeaturemask=0xfff77ef7 amdgpu.noretry=0 amdgpu.gpu_recovery=1 amdgpu.sched_hw_submission=2 mitigations=off ttm.pages_limit=3588867 ttm.page_pool_size=3588867 iommu=pt amd_iommu=on amdgpu.bc250_flush_by_runlist=1 amdgpu.bc250_sdma_fw=navi12"|' /etc/default/grub
+   sudo grub-mkconfig -o /boot/grub/grub.cfg
+   ```
+
+   The `sed` replaces `GRUB_CMDLINE_LINUX_DEFAULT` wholesale — that is the fleet
+   baseline. If your host carries other boot flags (disk encryption, `resume=`,
+   GPU quirks), merge them into the same line manually instead of clobbering
+   them. `mitigations=off` is a throughput choice for dedicated inference
+   blades, not a liberation requirement: omit it (keep the kernel's default
+   mitigations) if the host is not a dedicated inference box.
+
+4. **Preview, then run the build** (~30 minutes; nothing is touched without `--run`):
+
+   ```sh
+   sudo aputune build --pkgbuild ~/linux-cachyos/linux-cachyos          # preview
+   sudo aputune build --pkgbuild ~/linux-cachyos/linux-cachyos --run    # go
+   ```
+
+5. **Reboot and verify**:
+
+   ```sh
+   sudo reboot
+   sudo aputune doctor        # expect all checks live and 40/40 CUs
+   ```
+
+The build installs the kernel, arms `/etc/modprobe.d/aputune-40cu.conf`, and
+regenerates the initramfs for you.
 
 ## Quick start
 
-Needs Rust ([rustup.rs](https://rustup.rs)) and sudo.
+Needs Rust (see *Build dependencies* above) and sudo.
 
 ```sh
 ./install.sh    # release build + install to /usr/local/bin
@@ -55,6 +108,20 @@ arieltune apu <cmd>    # per-app CLI
 ```
 
 TUI keys: `1`-`4` (or `F1`-`F4`) jump tabs, `Ctrl-Tab` cycles, `Ctrl-Q` quits.
+
+## What gets unlocked
+
+| Feature | Where | Notes |
+|---|---|---|
+| **40-CU GPU unlock** | `sudo aputune build --run` + reboot | `aputune doctor` verifies 40/40 CUs active |
+| **8-core CPU unlock** | `arieltune apu cores` / TUI Core Map | Per-core control: deactivate the factory-set cores, force-unlock abnormal core layouts, Core Map view of the shader-array topology |
+| **SDMA firmware override** | automatic (build) | navi12 SDMA blobs + early TRAP enable, armed via `/etc/modprobe.d/aputune-40cu.conf` |
+| **Race-free clock control** | `arieltune apu` TUI / CLI | SMU gfxclk/cclk soft limits with live telemetry |
+| **PMFW telemetry** | `arieltune apu` | Clocks, WGP states, pstates, voltages (debugfs nodes shipped by the series) |
+| **Memory tuning** | `arieltune mem` | GDDR6 timing tuner (CMOS-backed) |
+| **Firmware surface** | `arieltune bios` | AMD CBS + OEM Setup surface |
+
+Every TUI tab has a matching CLI (`aputune`, `memtune`, `biostune`, `wikitune`).
 
 ## The one rule
 
