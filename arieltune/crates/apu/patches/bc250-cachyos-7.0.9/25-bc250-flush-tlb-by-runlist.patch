@@ -30,8 +30,9 @@ bc250-rocm-gabriwar/patches/bc250-flush-tlb-by-runlist.patch (cec746e):
   unconditionally on unmap
 - upstream places the param block next to the function; the deployed tree puts
   it near the top of kfd_device_queue_manager.c
-- the <linux/module.h> include is carried by patch 19 here (single addition in
-  the deployed tree)
+- the <linux/module.h> include and the BC250_PCI_DEVICE_ID define were
+  carried by patch 19 here in the deployed tree; this patch now defines
+  BC250_PCI_DEVICE_ID itself (19 is ON_DISK in the series)
 - MODULE_PARM_DESC wording is the deployed English translation
 
 Off by default: amdgpu.bc250_flush_by_runlist=1. The suite arms it in
@@ -42,7 +43,7 @@ By Gabriel Duarte Guerra (GabriWar).
 ---
 --- a/drivers/gpu/drm/amd/amdkfd/kfd_device_queue_manager.c
 +++ b/drivers/gpu/drm/amd/amdkfd/kfd_device_queue_manager.c
-@@ -50,6 +50,28 @@
+@@ -50,6 +50,32 @@
  static int set_pasid_vmid_mapping(struct device_queue_manager *dqm,
  				  u32 pasid, unsigned int vmid);
  
@@ -63,6 +64,10 @@ By Gabriel Duarte Guerra (GabriWar).
 + * Only call site is the unmap ioctl (holds p->mutex, not dqm_lock).
 + */
 +
++/* Patch 19 (ON_DISK) used to carry this define for this file; the series
++ * now self-contains it. */
++#define BC250_PCI_DEVICE_ID 0x13FE
++
 +static int bc250_flush_by_runlist;
 +module_param(bc250_flush_by_runlist, int, 0644);
 +MODULE_PARM_DESC(bc250_flush_by_runlist,
@@ -71,7 +76,7 @@ By Gabriel Duarte Guerra (GabriWar).
  static int execute_queues_cpsch(struct device_queue_manager *dqm,
  				enum kfd_unmap_queues_filter filter,
  				uint32_t filter_param,
-@@ -2126,6 +2148,51 @@
+@@ -2126,6 +2152,51 @@
  }
  
  /* dqm->lock mutex has to be locked before calling this function */
