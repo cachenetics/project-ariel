@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: arieltune
+      - name: build
+        working-directory: arieltune
+        run: cargo build --workspace --all-targets --locked
+      - name: test
+        working-directory: arieltune
+        run: cargo test --workspace --locked

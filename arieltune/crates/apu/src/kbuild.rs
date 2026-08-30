@@ -556,7 +556,16 @@ fn bc250_uma_mb() -> Result<Option<u64>> {
     let mut buf = [0u8; 4];
     mem.read_exact_at(&mut buf, mmio_base + 0xde3 * 4)
         .context("read RCC_CONFIG_MEMSIZE")?;
-    Ok(Some(u32::from_le_bytes(buf) as u64))
+    let raw = u32::from_le_bytes(buf);
+    // An all-ones readback is not a real carve: the APU is powered down or the
+    // MMIO BAR is unmapped, so the register floats high. Surface it as an error
+    // (the same all-ones sentinel the kernel's discovery read treats as -ENXIO)
+    // so preflight_uma skips with a warning instead of falsely blocking the
+    // build on a bogus "wrong carve".
+    if raw == u32::MAX {
+        bail!("RCC_CONFIG_MEMSIZE reads 0xFFFFFFFF (APU powered down or MMIO BAR unmapped)");
+    }
+    Ok(Some(raw as u64))
 }
 
 /// Gate the build on the BIOS UMA carve. A wrong carve is a build-host
