@@ -386,6 +386,34 @@ pub const SERIES: &[Patch] = &[
         "cyan_skillfish_ppt.c, smu11_driver_if_cyan_skillfish.h",
         Tell::ModParam("cs_eight_core_map")
     ),
+    patch!(
+        "29",
+        "29-bc250-tmr-discovery-offset-fix.patch",
+        "Honor IFWI-reported discovery TMR offset (scratch-register fallback)",
+        "The 6.12 discovery read assumes the IP discovery TMR sits at the top \
+         of VRAM (vram_size - 64K) and only falls back to sysmem when the VRAM \
+         size register reads zero. On BC-250 firmware neither assumption holds: \
+         the TMR location is reported through the driver scratch registers \
+         (mmDRIVER_SCRATCH_0/1/2), with the legacy default probed first. \
+         Backports the upstream amdgpu get_tmr_info logic (shipping in newer \
+         kernels) so discovery succeeds on boards whose TMR is not at the \
+         legacy default. Runtime-validated on blade15.",
+        "amdgpu_discovery.c, amdgpu_discovery.h",
+        Tell::Bundled
+    ),
+    patch!(
+        "30",
+        "30-cyan-skillfish2-hardcoded-fallback.patch",
+        "Fall back to the hardcoded IP table when discovery TMR is invalid",
+        "If the IP discovery TMR is missing or unreadable (some IFWI/UMA \
+         combinations never populate it), the cyan skillfish2 probe aborts \
+         with 'invalid ip discovery binary signature'. This patch falls back \
+         to the pre-discovery hardcoded IP table for cyan skillfish, the path \
+         this silicon ran on for years. Compile-validated on blade15; the \
+         fallback path only executes when discovery fails.",
+        "amdgpu_discovery.c",
+        Tell::Bundled
+    ),
 
 ];
 
