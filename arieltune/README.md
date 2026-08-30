@@ -28,13 +28,15 @@ Build the series against `linux-cachyos-bore-7.0.9`. Not 7.0.11+, which regresse
 
 ### Build dependencies
 
-Building arieltune itself needs a Rust toolchain (rustup). Building the patched kernel additionally needs `gcc15`, `bc`, and `base-devel` on the build host (`mkinitcpio` ships by default on CachyOS):
+Building arieltune itself needs a Rust toolchain (rustup). Building the patched kernel additionally needs `gcc15`, `bc`, `base-devel`, the clang + thinLTO toolchain (`clang`, `llvm`, `lld`, `pahole`), and the kernel-Rust pieces (`rust`, `rust-bindgen`, `rust-src` — the shipped 7.0.9 config has `CONFIG_RUST=y`) on the build host (`mkinitcpio` ships by default on CachyOS):
 
 ```sh
-sudo pacman -S --needed gcc15 bc base-devel
+sudo pacman -S --needed gcc15 bc base-devel clang llvm lld pahole rust rust-bindgen rust-src
 ```
 
 `arieltune apu build` and `arieltune apu liberate` pre-flight-check these before touching anything, and abort in seconds with the exact missing packages instead of failing deep into the ~30 minute build.
+
+The build also gates on the BIOS **UMA frame buffer size = 512M**. A different carve (e.g. 2G) breaks IP discovery (`invalid ip discovery binary signature`) and every PSP firmware load (`LOAD_IP_FW ... 0xFFFF0008`) — failures that look like patch bugs. The preflight reads the live carve and aborts the build with the BIOS fix.
 
 ## Quick start
 
