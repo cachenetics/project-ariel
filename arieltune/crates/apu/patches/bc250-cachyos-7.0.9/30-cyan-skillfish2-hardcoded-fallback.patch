@@ -1,4 +1,4 @@
-]633;E;echo "diff -uprN '--exclude=*.o' '--exclude=*.o.d' '--exclude=*.cmd' a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c";19087685-c0d7-4e30-b2a3-cedd9fe6a981]633;Cdiff -uprN '--exclude=*.o' '--exclude=*.o.d' '--exclude=*.cmd' a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c
+diff -uprN '--exclude=*.o' '--exclude=*.o.d' '--exclude=*.cmd' a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c	2026-08-22 18:29:33.725207690 -0500
 +++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_discovery.c	2026-08-22 18:30:07.416322624 -0500
 @@ -2910,34 +2910,42 @@ int amdgpu_discovery_set_ip_blocks(struc
