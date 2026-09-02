@@ -1655,6 +1655,136 @@ queue 3.
                      See: SMU / MP1 (P-state points, CPU OC) · BAPM / CAC (DPM_WAC MSRs)
 ```
 
+## 8-Core CPU Unlock
+
+```
+── 8-CORE CPU UNLOCK ──────────────────── SMU core-presence mask · runtime · no flash ──
+
+The BC-250 ships 6C/12T, but the silicon is an 8-core Zen 2 APU with two cores masked
+off in firmware — the same cores 3 and 7 shown fused in the CPU — Zen 2 fuse table
+above.  arieltune apu cores unlocks them at runtime: no flashing, no BIOS dependency,
+and it works on both the P3 dev BIOS and the P5 hive BIOS.  The tooling surface (CLI,
+boot unit, the Core Map TUI panel) is in Chapter 5 → arieltune apu; this section is
+the primitive, the state machine, the safety model, and the telemetry patch.
+
+┌─ THE PRIMITIVE, ONCE ────────────────────────────────────────────────────────────────┐
+│  Register     SMN 0x5A870   SMU space 0x115A870 — the core-presence mask             │
+│  0x77 (stock) 6C / 12T      cores 3 and 7 masked                                     │
+│  0xFF         8C / 16T      both hidden cores present                                │
+│  Writer       SMU q3 0x98   a raw SMN-window write of a HARDCODED 0xFF to the address│
+│                             in arg0 — all-or-nothing, no value arg, no address       │
+│                             validation                                               │
+│  Persistence  warm keeps    a warm reboot re-enumerates and preserves the mask; a    │
+│                             cold boot (power removed) reverts to 0x77 — nothing is   │
+│                             written to flash                                         │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+── STATE MACHINE ───────────────────────────────── LOCKED → PENDING-REBOOT → UNLOCKED ──
+
+                    cold boot (mask reverts)
+  LOCKED ─────────────────────────────────────────────────────┐
+   0x77 · 12 threads                                           │
+     │ apply / boot  (q3 0x98, readback verified 0xFF)         │
+     ▼                                                         │
+  PENDING-REBOOT ──── warm reboot ────▶ UNLOCKED ──────────────┘
+   0xFF · 12 threads                    0xFF · 16 threads
+     │
+     └─ any mask ∉ {0x77, 0xFF}  ⇒  ABNORMAL
+        (every safe write refuses; only the explicit force hatch writes)
+
+┌─ HARD GATES — every mutating verb, all live reads ───────────────────────────────────┐
+│  1  ariel_apu_present() — PCI 1002:13fe really is a BC-250.                          │
+│  2  SmnAperture open + a short-transfer sanity check.                                │
+│  3  live mask read; proceed only from 0x77 (no-op on 0xFF).                          │
+│  4  post-write live mask verify == 0xFF; on failure report the SMU status and stop.  │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ SAFETY INVARIANTS ──────────────────────────────────────────────────────────────────┐
+│  No auto-reboot   ever          an earlier community systemd version rebooted after  │
+│                                 applying and bootlooped a real board (the reset did  │
+│                                 not preserve the mask, /var was not durable early    │
+│                                 enough, systemctl reboot cannot run before D-Bus).   │
+│                                 The unit applies the mask and stops                  │
+│  Refuse abnormal  1 hatch       safe paths proceed only from 0x77; a genuine abnormal│
+│                                 mask (a dev blade shipped 0xD7) is written only via  │
+│                                 apply --force-abnormal or the TUI [F] confirm — same │
+│                                 0x98 write, same readback, explicit warning, still no│
+│                                 auto-reboot.  The boot unit has no force path        │
+│  No verdict cache clones        the fleet clones OS images across blades, so any     │
+│                                 persisted "this blade passed" state is untrustworthy;│
+│                                 only live reads are trusted.  cores verify is        │
+│                                 advisory, never a gate                               │
+│  Granularity      OS offline    every practical core count (a 2C test run, skipping a│
+│                                 defective core) is reached by 0xFF unlock +          │
+│                                 /sys/.../cpuN/online offlining — proven, instant,    │
+│                                 reversible, and it keeps the SMU-visible topology at │
+│                                 the exact 8-core shape all community fixes were      │
+│                                 validated against                                    │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ CLI SURFACE — arieltune apu cores <verb>  (root-gated) ─────────────────────────────┐
+│  status                          mask, state, visible cores, MCE count               │
+│  apply [--reboot]                unlock now; --reboot warm-resets, else print        │
+│        [--force-abnormal]        PENDING-REBOOT; --force-abnormal skips the 0x77 gate│
+│  boot                            idempotent boot-unit path — never forces, exit 0 on │
+│                                  already-unlocked or refused (journal note)          │
+│  install / uninstall             install/remove the binary + systemd unit            │
+│  verify [secs_per_core]          stress-ng --verify sweep (advisory; writes a report │
+│                                  nothing reads back)                                 │
+│  acpi {status|install|revert}    8-core SSDT-CST/PST initcpio override (extends      │
+│                                  C-states past C00B to C00F for threads 12-15)       │
+│  offline / online {core|all}     live OS-layer per-thread toggle (instant, no reboot)│
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ BOOT SERVICE — aputune-cores.service (written by cores install) ────────────────────┐
+│  Type=oneshot · RemainAfterExit=yes · ExecStart=… apu cores boot                     │
+│  After=multi-user.target · ConditionPathExists=…/pci/devices/0000:00:00.0/config     │
+│  Rules that MUST survive any edit:                                                   │
+│    • the unit NEVER reboots (the bootloop lesson).                                   │
+│    • boot is idempotent: 0xFF exits 0; 0x77 applies and exits 0; anything else       │
+│      journals the refusal and exits 0 (no restart storm); the unit has no force path.│
+│    • after a cold boot the mask is re-set within seconds; cores appear next reboot.  │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+── KERNEL PATCH 28 — 8-CORE TELEMETRY ───────────────────────── hybrid metrics layout ──
+
+After unlock the firmware redistributes the 116-byte SMU metrics table and
+GfxclkFrequency loses its 0x44 slot (it becomes C0Residency[6]), so pp_dpm_sclk's
+starred value, OD_SCLK, gpu_metrics.current_gfxclk and hwmon freq1_input all read a
+residency counter.  Patch 28 reinterprets the table with the empirically mapped
+hybrid layout and reads gfxclk directly via SMU_MSG_QueryGfxclk (already mapped by
+patch 02, battle-tested by patch 05) with a table fallback.  It auto-detects via CPU
+topology; amdgpu.cs_eight_core_map=1 forces it, and it is safe on 6-core blades,
+which stay on the stock 6-wide layout.  The fence-rate governor is immune regardless:
+it drives off fence counters and temperature_gfx (offset 4, which keeps its 0x46
+slot), never the metrics table.
+
+── EXPERIMENTAL — ARBITRARY FIRMWARE MASKS (NOT SHIPPED) ────────────── research only ──
+
+Writing an arbitrary 8-bit mask (e.g. 0x03 = 2C, 0x7F = skip core 7) to SMN 0x5A870
+needs the SMU queue-2 message 0x23 exploit (a ring-subqueue overflow to a fake
+transfer-table pointer, giving arbitrary SMU write + code exec).  It is proven only
+as a PoC on BIOS 3, with no production deployment anywhere.  It is parked as
+research: the exploit is memory-corruption class with BIOS-3-only offsets (the hive
+is P5); the 116-byte metrics layout is mapped only for 0x77 and 0xFF, so patch 28
+would mis-decode an arbitrary mask; and ACPI over-coverage is unverified on a non-
+standard mask.  Everything the fleet needs is covered by 0xFF + OS offlining.
+
+┌─ CAUTION ────────────────────────────────────────────────────────────────────────────┐
+│  No path auto-reboots — ever (the bootloop incident).  The 0x98 write obeys the same │
+│  SMU mailbox discipline as every other queue-3 message: one message per 100 ms, no   │
+│  traffic during sustained GPU compute (Chapter 2 → SMU / MP1).  After a successful   │
+│  apply the SoC power/thermal envelope changes with two extra cores — re-validate any │
+│  existing CPU OC/UV and GPU VDDC settings.  Abnormal masks are refused on every safe │
+│  path; the single force hatch (--force-abnormal / TUI [F]) warns first and still     │
+│  never reboots.                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+        See: Ch.5 → arieltune apu (Core Map TUI, CLI, unit) · SMU / MP1 (queue 3, msg
+             pacing) · Applied Patch Ledger (patch 28) · CPU — Zen 2 (the fused cores)
+```
+
+
 ## GPU Silicon Identity (gfx1013)
 
 ```
@@ -4842,7 +4972,7 @@ policy around it.  The four clock domains and their configuration surfaces:
 
 ┌─ CLOCK DOMAINS ──────────────────────────────────────────────────────────────────────┐
 │  GFXCLK   SMN 0x16C00   SMU DPM; runtime control via amdgpu OverDrive (requires      │
-│                         amdgpu.ppfeaturemask=0xffffffff)                             │
+│                         amdgpu.ppfeaturemask=0xfff77ef7)                             │
 │  SOCCLK   SMN 0x16E00   SMU-owned; no configuration surface                          │
 │  MCLK     SMN 0x17000   trained at boot from the AGESA-generated PowerPlay table;    │
 │                         BIOS fields inert (see Memory Configuration)                 │
@@ -4883,7 +5013,7 @@ userspace.  The live production command line (CachyOS/BORE kernel, BIOS P3.00):
 │  mitigations=off amd_iommu=off                                                       │
 │  zswap.enabled=1 zswap.zpool=zsmalloc zswap.compressor=zstd                          │
 │  ttm.pages_limit=4194304                                                             │
-│  amdgpu.ppfeaturemask=0xffffffff amdgpu.noretry=0 amdgpu.gartsize=16384 amdgpu.dc=0  │
+│  amdgpu.ppfeaturemask=0xfff77ef7 amdgpu.noretry=0 amdgpu.gartsize=16384 amdgpu.dc=0  │
 │  amdgpu.bc250_cc_write_mode=3 amdgpu.mtype_local=2 amdgpu.sched_policy=2             │
 │  amdgpu.lockup_timeout=2000,2000,100,2000 amdgpu.num_kcq=4 amdgpu.cg_mask=0          │
 │  pci=realloc,assign-busses iomem=relaxed console=tty0 console=ttyS1,115200           │
@@ -4896,10 +5026,17 @@ userspace.  The live production command line (CachyOS/BORE kernel, BIOS P3.00):
   iomem                       relaxed                LOAD-BEARING — required for SMU
                                                      register access from userspace
                                                      tools
-  amdgpu.ppfeaturemask        0xffffffff             LOAD-BEARING — enables
-                                                     OverDrive/DPM/power management;
-                                                     without it the GPU is locked to
-                                                     base clock
+  amdgpu.ppfeaturemask        0xfff77ef7             LOAD-BEARING — enables
+                                                     OverDrive + DPM + power
+                                                     management.  Bit 14
+                                                     (PP_OVERDRIVE_MASK) gates
+                                                     pp_od_clk_voltage; the older
+                                                     0xfff73ef7 cleared it and
+                                                     silently no-oped every voltage
+                                                     write.  All-ones 0xffffffff is
+                                                     avoided — it also asserts
+                                                     GFXOFF/BACO/VCN_PG, which this
+                                                     silicon cannot run
   amdgpu.gartsize             16384                  16 GB GTT zero-copy pool; large
                                                      buffers map here
   amdgpu.noretry              0                      GPU page-fault retry enabled —
@@ -4975,7 +5112,7 @@ the FCH TCO hardware watchdog, configured as static module options:
 │                                                                                      │
 ├──────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                      │
-│      KERNEL     amdgpu — 6-patch gfx1013 series      in-tree module · GCC-built      │
+│      KERNEL     amdgpu — curated 01-28 + 29/30       in-tree module · GCC-built      │
 │      SMU        cyan_skillfish_ppt.c — PowerPlay     SMU fw 88.6.0 (0x00580600)      │
 │      MESA       RADV (ACO) · radeonsi · rusticl      Vulkan · OpenGL · OpenCL 3.0    │
 │      COMPILER   ACO (RADV) · LLVM AMDGPU             -mcpu=gfx1013 every other path  │
@@ -4989,10 +5126,11 @@ the FCH TCO hardware watchdog, configured as static module options:
 The driver stack brings the Oberon GPU up under Linux: the patched amdgpu kernel
 module and its PowerPlay/SMU layer below; the Mesa userspace (RADV/ACO, radeonsi,
 rusticl), the LLVM AMDGPU backend, and the ROCm toolchain above.  On gfx1013 the
-stock stack does not work — the silicon requires a six-patch kernel series, a
-cache-coherent memory model, and a compute routing that avoids a defective command
-processor.  The carrier's platform devices — network, FCH SATA/USB/SMBus, Super
-I/O — bind stock Linux drivers and close the chapter.
+stock stack does not work — the silicon requires the curated 01-28 kernel series
+(plus two discovery-path fixes, 29/30), a cache-coherent memory model, and a compute
+routing that avoids a defective command processor.  The carrier's platform devices —
+network, FCH SATA/USB/SMBus, Super I/O — bind stock Linux drivers and close the
+chapter.
 
      HIP app             Vulkan app            OpenGL / OpenCL app
         │                    │                          │
@@ -5020,6 +5158,7 @@ I/O — bind stock Linux drivers and close the chapter.
   GPUVM Memory Model                Kernel Boot Parameters
   KFD / HSA Compute Interface       Platform Drivers
                                     Firmware and VBIOS Identifiers
+  arieltune apu — TUI & Core Map
 
         See: Chapter 2 · Subsystem Internals (GPU, SMU, UMC) — Chapter 6 · Compute Stack
                      Chapter 4 · System Configuration (UMA carveout, boot configuration)
@@ -5076,24 +5215,44 @@ activates 24; a kernel patch enables the fused 16 (Chapter 2 → GPU).
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ MODULE PARAMETERS — function-critical · boot-line placement → Boot Parameters ──────┐
-│  amdgpu.gartsize             16384        16 GB GTT pool — without it, only the      │
-│                                           small carveout                             │
-│  amdgpu.ppfeaturemask        0xffffffff   unlocks SMU power management (clock        │
-│                                           control)                                   │
-│  amdgpu.noretry              0            enables page-fault retry                   │
-│  amdgpu.dc                   0            display core off — headless                │
-│  amdgpu.sched_policy         2            round-robin GPU scheduler for compute      │
-│  amdgpu.num_kcq              4            kernel compute queues (set on the boot     │
-│                                           line; unset default 8)                     │
-│  amdgpu.cg_mask              0            clock gating disabled (boot line)          │
-│  amdgpu.mtype_local          2            MTYPE_CC for local memory (boot line)      │
-│  amdgpu.lockup_timeout       2000,2000,100,2000                                      │
-│                                           per-ring hang detection ms: GFX,           │
-│                                           compute, SDMA, video                       │
-│  amdgpu.bc250_cc_write_mode  3            BC-250 cache-coherent write mode —         │
-│                                           3 = full-40CU-liberation                   │
-│  ttm.pages_limit             4194304      16M-page TTM pool — too small              │
-│                                           deadlocks large allocations                │
+│  amdgpu.gartsize              16384        16 GB GTT pool — without it, only the     │
+│                                            small carveout                            │
+│  amdgpu.ppfeaturemask         0xfff77ef7   unlocks SMU power management + OverDrive; │
+│                                            bit 14 (PP_OVERDRIVE_MASK) gates          │
+│                                            pp_od_clk_voltage — the older 0xfff73ef7  │
+│                                            cleared it and no-oped voltage writes     │
+│  amdgpu.noretry               0            enables page-fault retry                  │
+│  amdgpu.dc                    0            display core off — headless               │
+│  amdgpu.sched_policy          2            round-robin GPU scheduler for compute     │
+│  amdgpu.num_kcq               4            kernel compute queues (boot line; unset   │
+│                                            default 8)                                │
+│  amdgpu.cg_mask               0            clock gating disabled (boot line)         │
+│  amdgpu.mtype_local           2            MTYPE_CC for local memory (boot line)     │
+│  amdgpu.lockup_timeout        2000,2000,100,2000  per-ring hang detection ms: GFX,   │
+│                                                   compute, SDMA, video               │
+│  amdgpu.bc250_cc_write_mode   3            BC-250 cache-coherent write mode — 3 =    │
+│                                            full-40-CU liberation (patch 16)          │
+│  amdgpu.bc250_flush_by_runlist  1          rebuild the runlist on unmap so the       │
+│                                            firmware invalidates the compute TLB      │
+│                                            (patch 25); default off                   │
+│  amdgpu.bc250_sdma_fw           navi12     override the SDMA firmware base (patch 26)│
+│                                            — armed by default via the                │
+│                                            aputune-40cu.conf drop-in; the stock cyan │
+│                                            blob copies 0 bytes                       │
+│  amdgpu.bc250_early_sdma_trap   1          write SDMA TRAP_ENABLE in gfx_resume      │
+│                                            (patch 27) — armed by default; kills the  │
+│                                            two 500 ms boot stalls                    │
+│  amdgpu.bc250_skip_sdma0        0          RETIRED fallback (patch 19, on disk) — re-│
+│                                            arm =1 only if the navi12 firmware swap is│
+│                                            reverted                                  │
+│  amdgpu.bc250_fault_probe       1          log the gfx1013 inst-fetch fault vector + │
+│                                            bit-47-cleared candidate (patch 17,       │
+│                                            report-only); default on                  │
+│  amdgpu.cs_eight_core_map       0          force the hybrid 116-byte SMU metrics     │
+│                                            layout after the 8-core unlock (patch 28);│
+│                                            else auto-detected via topology           │
+│  ttm.pages_limit              4194304      16M-page TTM pool — too small deadlocks   │
+│                                            large allocations                         │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
 num_kcq=4, cg_mask=0, and mtype_local=2 are all set explicitly on the boot line —
@@ -5139,62 +5298,193 @@ the compiler sensitivity applied to the old out-of-tree flow.
 ## Applied Patch Ledger
 
 ```
-── APPLIED PATCH LEDGER ──────────────────────────────────── six patches · four files ──
+── APPLIED PATCH LEDGER ───────────────────────────── curated series 01-28 · by layer ──
 
-Six patches across four source files bring stock amdgpu to gfx1013 working state.
-They are stored in a local patch repository and re-applied automatically on kernel
-upgrade by a pacman hook.
+The curated portable series is 28 numbered patches over the amdgpu/SMU tree — plus
+two discovery-path robustness fixes, 29 and 30 — authored on linux-cachyos-bore-7.0.2
+and applied unchanged through 7.0.9 via the makepkg flow (driven by aputune build),
+not make M=. It supersedes the earlier six-patch set. Three patches sit on disk, NOT
+applied: 12, 19, 21. Pin the kernel to linux-cachyos-bore-7.0.9; do NOT build against
+7.0.11+, which regresses the BC-250 SDMA path. Read the series as layers, not a flat
+list.
 
-┌─ PATCH SERIES ───────────────────────────────────────────────────────────────────────┐
-│  1  Clock + voltage    cyan_skillfish_ppt.c   replaces broken RequestGfxclk with     │
-│                                               ForceGfxFreq / ForceGfxVid; adds       │
-│                                               V/F curve (1000-2230 MHz), 3 DPM       │
-│                                               levels, voltage coordination           │
-│  2  MTYPE=CC default   gmc_v10_0.c            compute BOs default to MTYPE=CC —      │
-│                                               the stock NC default ring-resets       │
-│                                               on compute dispatch (MANDATORY)        │
-│  3  APU prefer GTT     amdgpu_ttm.c           routes UMA allocations to GTT when     │
-│                                               a fixed UMA carveout is forced;        │
-│                                               adds SNOOPED+SYSTEM PTE flags to       │
-│                                               VRAM (conditional — not needed         │
-│                                               with BIOS UMA=Auto)                    │
-│  4  gfxhub L1 TLB      gfxhub_v2_1.c          MTYPE_CC for coherent GFX address      │
-│                                               translation                            │
-│  5  mmhub L1 TLB       mmhub_v2_3.c           MTYPE_CC for coherent system           │
-│                                               (SDMA/VCN/display) address             │
-│                                               translation                            │
-│  6  VCN fast-skip      vcn_v2_0.c             early return in vcn_v2_0_hw_init()     │
-│                                               — skips ring/IB tests the              │
-│                                               firmware-locked power island can       │
-│                                               never pass                             │
+┌─ SMU MESSAGING · CLOCKS · TELEMETRY ───────────────────────────────────────── 01-11 ─┐
+│  01    enum               declare the new SMU_MSG_* enum values the msg map needs    │
+│                           (smu_types.h)                                              │
+│  02    msgmap             map 23 msgids (11→34); raise CYAN_SKILLFISH_SCLK_MAX       │
+│                           2000→2500 MHz                                              │
+│  03    clk force          set_performance_level + ForceGfxFreq / UnForceGfxFreq — the│
+│                           basis of gpu force / wake / deep-sleep / autosleep         │
+│  04    tele               StartTelemetryReporting, so SmuMetrics_t actually populates│
+│  05    gfxclk             GFXCLK sensor reads direct via QueryGfxclk — the metrics   │
+│                           path races                                                 │
+│  06-08 send-raw           CAC-weight read helpers + the smu_send_raw foundation and  │
+│                           its debugfs node (the race-free actuator path)             │
+│  09    cclk               cclk_soft_min / cclk_soft_max debugfs — the CPU clock-     │
+│                           control surface                                            │
+│  10-11 dump               32-bit CAC print fix + the full telemetry-dump node (clocks│
+│                           / pstates / voltages)                                      │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-┌─ SUPPLEMENTARY — gmc_v10_0.c (introduced with the BORE kernel rebuild) ──────────────┐
-│  TLB KIQ bypass    gmc_v10_0_flush_gpu_tlb() skips the KIQ path, uses direct         │
-│                    MMIO — the part hangs on the KIQ TLB-invalidation path            │
-│  MTYPE CC default  default MTYPE set to CC; override remains NC for RADV-safe        │
-│                    BOs                                                               │
-│  GART CC+SNOOP     GART PTEs set MTYPE_CC + SNOOPED (stock: uncached, no-snoop)      │
+┌─ GPU-HANG DEFENSE ────────────────────── 3 layers · 13 / 14 / 15 + SDMA fix 26 / 27 ─┐
+│  13    GFXOFF             Layer 1 — GFXOFF disabled for gfx1013, so the GPU never    │
+│                           enters the unrecoverable power state (Fabian & Dani)       │
+│  14    KIQ 2a             Layer 2a — KIQ bypass + dead-GPU detection in gmc_v10_0 TLB│
+│                           flush (5 sub-patches; 14(e) forces                         │
+│                           flush_pasid_uses_kiq=false for gfx10.1.x)                  │
+│  15    KIQ 2b             Layer 2b — the same KIQ bypass + dead-GPU detection in     │
+│                           centralized amdgpu_gmc code (2 sub-patches)                │
+│  26    SDMA fw            Layer 3 — APPLIED: fix SDMA itself.  Override the SDMA     │
+│                           firmware to a navi12 blob (the stock cyan_skillfish2 blob  │
+│                           copies 0 bytes / never drives user queues); armed by       │
+│                           default via amdgpu.bc250_sdma_fw=navi12; falls back to the │
+│                           stock blob on a missing-blob load-miss instead of failing  │
+│                           probe (GabriWar)                                           │
+│  27    SDMA trap          Layer 3 — APPLIED: write SDMA TRAP_ENABLE in gfx_resume,   │
+│                           removing the two 500 ms "Fence fallback" boot stalls; armed│
+│                           via amdgpu.bc250_early_sdma_trap=1.  Companion to 26       │
+│  19    fallback           ON DISK — the retired SDMA0-skip workaround (steer user    │
+│                           queues to engine 1); re-arm amdgpu.bc250_skip_sdma0=1 only │
+│                           if the firmware swap is reverted                           │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-The MTYPE patch is surgical: it keys on the buffer-object coherency flag, so BOs
-created with the coherent flag map to CC and everything else remains NC — this is
-how coherent (KFD) and non-coherent (RADV) consumers coexist on one module.  The
-patch also restores the TLB invalidation an earlier broad patch had skipped, and
-retains invalidation engine 14 (engine 17 is dead on this silicon).
+The hang layers are gated on IP_VERSION(10,1,x), so they are no-ops on non-BC-250
+hardware. Because the internal PCIe fabric lacks a completion timeout, any MMIO read
+to a dead GPU hangs the CPU indefinitely; the dead-GPU detection catches the
+0xFFFFFFFF reads. The SDMA exit is COMPLETE: 26/27 armed by default (2026-08-19),
+SDMA H2D round-trips validated (2026-08-20), patch 19 retired to on-disk fallback.
+Fleet-safe arming: the modprobe writer skips the bc250_sdma_fw line unless both
+navi12_sdma.bin* and navi12_sdma1.bin* are present (warn + skip) — never a mixed
+navi12/cyan pair, never a hard sdma-init failure.
 
-┌─ DELIBERATELY NOT APPLIED ───────────────────────────────────────────────────────────┐
-│  vram_base_offset   broke the rusticl path; redundant once apu_prefer_gtt was        │
-│                     in place                                                         │
-│  VCN power-gate     the boot-time SDMA fence timeouts it addresses are cosmetic      │
+┌─ 40-CU UNLOCK ─────────────────────────────────── applied 16 · on-disk alternate 12 ─┐
+│  16    CU (app)           APPLIED — 40-CU unlock, CC + SPI only, deliberately NO     │
+│                           RLC_PG (safe for ROCm + HSA); amdgpu.bc250_cc_write_mode=3 │
+│  12    CU (disk)          ON DISK, NOT APPLIED — the original Vulkan/RADV unlock (CC │
+│                           + SPI + RLC); hangs ROCm/HSA on the first KFD queue        │
 └──────────────────────────────────────────────────────────────────────────────────────┘
+
+Why no RLC write: writing RLC_PG_ALWAYS_ON_WGP_MASK while RLC firmware is running
+triggers the WGP bring-up state machine for harvested WGPs 3-4, whose handshake
+registers are uninitialized; the RLC stalls on an ACK that never arrives and the next
+KFD queue op hangs. The board already has RLC_PG_CNTL=0 (PG globally off via
+ppfeaturemask), so the RLC write is redundant. 16 covers both Vulkan and ROCm and is
+the one apu build applies; run the Vulkan-only variant only by pointing the 16
+registry entry in crates/apu/src/patches.rs at patch 12 — never with a ROCm/HSA
+workload planned.
+
+┌─ TTM CRASH CONTAINMENT & COMPUTE-DEFECT PROBE ─────────────────── 17 / 18 / 20 / 22 ─┐
+│  17    probe              report-only gfx1013 instruction-fetch fault probe: logs the│
+│                           raw interrupt vector + a bit-47-cleared candidate address; │
+│                           changes no control flow, fixes nothing;                    │
+│                           amdgpu.bc250_fault_probe                                   │
+│  18    unpop              guard NULL ttm->pages[] on the unpopulate path — a compute │
+│                           fault ends the process instead of panicking the kernel     │
+│                           (CR2=0x18)                                                 │
+│  20    pop                READ_ONCE + return -ENOMEM NULL guard on the TTM populate  │
+│                           path — completes patch 18                                  │
+│  22    no-lto             build amdgpu_ttm.o with -fno-lto so ThinLTO cannot elide   │
+│                           the guards from 18 and 20                                  │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+Neither 17 nor 18 claims a fix; they exist so the open compute defect can be studied
+without losing a blade (Chapter 6 → ROCm / KFD Compute Path). Deliberately NOT
+shipped: fault-handler retry, address rewriting, warmup dispatches and serialize-
+kernel throttling — each changes timing or hides the symptom without addressing why
+the bad bit is set.
+
+┌─ TLB ALIASING FIX ──────────────────────────────────────────────────── 23 / 24 / 25 ─┐
+│  23    GB_ADDR            APPLIED — GB_ADDR_CONFIG 0x00000044→0x00100044 in the      │
+│                           gc_10_1_2 golden table (deployed form; GabriWar later      │
+│                           retracted it upstream — a re-test divergence, but the      │
+│                           production blade carries it)                               │
+│  24    all-VMID           flush every mapped process VMID on each TLB invalidation   │
+│                           via direct MMIO (no KIQ), instead of racing PASID matches. │
+│                           Active on snap-a0af1eeb                                    │
+│  25    runlist            rebuild the runlist on unmap so the firmware truly         │
+│                           invalidates the compute TLB — the measured fix that made   │
+│                           PyTorch work. Active on snap-8fe794e8;                     │
+│                           amdgpu.bc250_flush_by_runlist=1                            │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+The aliasing bug: hipFree unmaps, hipMalloc reuses the same VA with new physical
+backing, the PTEs are correct, but the GPU keeps translating through the previous
+mapping because its compute TLB is never invalidated (the PASID scan finds zero VMIDs
+— mmATC_VMID*_PASID_MAPPING is never written under HWS). Patch 25's measurement
+settles it: single boot, counterbalanced, stock 13/18 dirty vs runlist 0/18 dirty
+(Fisher p=3.7e-06), verified active via ftrace execute_queues_cpsch (6→68), zero
+board errors.
+
+┌─ 8-CORE TELEMETRY ────────────────────────────────────────────────────────────── 28 ─┐
+│  28    metrics            APPLIED — hybrid 116-byte SMU metrics layout after the     │
+│                           8-core CPU unlock: GfxclkFrequency loses its 0x44 slot (now│
+│                           C0Residency[6]); reinterprets the table and reads gfxclk   │
+│                           direct via QueryGfxclk with a table fallback. Auto-detects │
+│                           via topology; amdgpu.cs_eight_core_map=1 forces; safe on   │
+│                           6-core blades (Chapter 2 → 8-Core CPU Unlock)              │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ DISCOVERY-PATH FIXES ──────────────────────── 29 / 30 · robustness, not liberation ─┐
+│  29    TMR offset         APPLIED — honor the IFWI-reported discovery-TMR location:  │
+│                           probe the legacy VRAM default, then take size/offset from  │
+│                           mmDRIVER_SCRATCH_0/1/2 (sysmem supported).  Backport of    │
+│                           upstream get_tmr_info — fixes "invalid ip discovery binary │
+│                           signature" on boards whose firmware does not place the TMR │
+│                           at the legacy offset (amdgpu_discovery.c/.h)               │
+│  30    IP fallback        APPLIED — if discovery is still unavailable (some IFWI/UMA │
+│                           combinations never populate the TMR), fall back to the pre-│
+│                           discovery hardcoded cyan skillfish IP table instead of     │
+│                           failing the probe.  Runs only when discovery fails;        │
+│                           compile-validated (amdgpu_discovery.c)                     │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ ON DISK, NOT APPLIED — tracked in the aputune TUI ──────────────────────────────────┐
+│  12    Vulkan CU          alternate to 16; CC+SPI+RLC — hangs ROCm/HSA               │
+│  19    SDMA0-skip         RETIRED by 26+27 — kept as the fallback if SDMA0 misbehaves│
+│                           after the navi12 firmware swap (re-arm bc250_skip_sdma0=1) │
+│  21    PASID-flush        superseded by 14(e), which already sets                    │
+│                           flush_pasid_uses_kiq=false for gfx10.1.x (neoney)          │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+GabriWar's 0002-bc250-rocm-vm-flush.patch is also deliberately not staged: applied
+patch 14(e) already forces flush_pasid_uses_kiq=false on the exact line 0002 touches.
+
+┌─ DELIBERATELY NOT SHIPPED ───────────────────────────────────────────────────────────┐
+│  —     UMC wire           memory-controller territory — memtune's domain, not aputune│
+│  —     power-brake        experimental BAPM/DiDT stall tuning; MGCG deadlocks        │
+│                           compute; risky on other boards                             │
+│  —     SW-DPM             the firmware exposes no usable GPU load signal (flat ~1500 │
+│                           MHz idle/light), so aputune does power app-driven (gpu     │
+│                           autosleep)                                                 │
+│  —     raw msgid          raw SMU pokes (reset/pstate/VMID) — a footgun; aputune uses│
+│                           only the msgids it needs via smu_send_raw                  │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+── SNAPSHOT LINEAGE ─────────────────────────────── register lane · production blade ──
+
+ snap-31bbf471  (19-patch, stable fallback)
+   └─ snap-a0af1eeb  (19-patch + 24: all-VMID TLB flush)
+        └─ snap-8fe794e8  (25-patch: runlist rebuild flush)  ← active on the blade
+
+The deployed 25-patch build (snap-8fe794e8, amdgpu.ko srcversion C484A6D2,
+modtree=build2) diverges from the pristine series in three known ways: gfx_v10_0.c
+carries the blade's own RLC-writing unlock variant rather than patch 16's no-RLC
+form; gmc_v10_0.c omits patch 17; and amdgpu/Makefile omits patch 22 (-fno-lto).
+Runtime: bc250_flush_by_runlist=1, bc250_cc_write_mode=3, and the navi12 SDMA
+override armed (bc250_sdma_fw=navi12 + bc250_early_sdma_trap=1; patch 19 retired) —
+both SDMA rings come up with TRAP_ENABLE=1 and no fence-fallback boot stalls.
 
 ┌─ CAUTION ────────────────────────────────────────────────────────────────────────────┐
-│  In the patch-1 OD path, voltage MUST be set before frequency — reverse              │
-│  ordering violates SVI2 sequencing and can crash the SMU (see PowerPlay).            │
+│  Kernel pin is load-bearing: build only against linux-cachyos-bore-7.0.9; 7.0.11+    │
+│  regresses the SDMA path.  Patches 12/19/21 are on disk, NOT applied — 12 hangs ROCm;│
+│  19 is the retired SDMA fallback, re-armed only if the navi12 firmware swap is       │
+│  reverted.  ppfeaturemask must keep bit 14 (PP_OVERDRIVE_MASK) set (0xfff77ef7) or   │
+│  every pp_od_clk_voltage write silently no-ops.  In the clock/voltage path (patch 03)│
+│  voltage MUST be set before frequency — reverse ordering violates SVI2 sequencing and│
+│  can crash the SMU (see PowerPlay).                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
-        See: GPUVM Memory Model (PTE flag semantics) — PowerPlay / SMU Layer (patch 1)
+        See: Kernel Patch Series roadmap — PowerPlay / SMU Layer (03) — Ch.6 → ROCm/KFD
 ```
 
 ## PowerPlay / SMU Driver Layer (cyan_skillfish_ppt)
@@ -5488,11 +5778,58 @@ no demand paging.  Four kernel compute queues are enabled (num_kcq=4, set on the
 boot line).  HSA_OVERRIDE_GFX_VERSION=10.1.0 makes the HSA runtime load gfx1010
 code objects, since no native gfx1013 target exists.
 
-┌─ CAUTION ────────────────────────────────────────────────────────────────────────────┐
-│  KFD compute queues live on the MEC, which carries a silicon-level store-hang        │
-│  defect — never rely on non-atomic global stores through the MEC.  The               │
-│  production compute paths (Vulkan, rusticl, raw PM4) bypass KFD entirely and         │
-│  run on the GFX ring.                                                                │
+── ROCm / KFD IS PRODUCTION-STABLE FOR INFERENCE ───────────── the other compute path ──
+
+The RADV/Vulkan path (Chapter 6) is the graphics-side production surface, but the
+ROCm/KFD path is real and stable for the workloads it is validated on: LLM inference,
+matmul, conv2d and LoRA training all run through /dev/kfd and the MEC queues. What is
+NOT stable is a second heavy GPU phase (training backward, img2img reverse, multi-
+step generation) — the open compute defect, analysed in Chapter 6.
+
+┌─ ROCm STACK (validated) ─────────────────────────────────────────────────────────────┐
+│  ROCm                7.2.4      arch4edu package                                     │
+│  PyTorch             2.12.0a0   custom gfx1013 build                                 │
+│  Compute units       40         patch-16 unlock (patch 12 hangs ROCm on the first KFD│
+│                                 queue)                                               │
+│  Memory              ~17.2 GB   unified GDDR6 (UMA)                                  │
+│  Kernel              7.0.9      cachyos, 25-patch build (amdgpu.ko srcversion        │
+│                                 C484A6D2)                                            │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ REQUIRED ENVIRONMENT ───────────────────────────────────────────────────────────────┐
+│  HSA_ENABLE_SDMA          1            SDMA0 is healthy with the navi12 firmware     │
+│                                        override (patch 26) — the old =0 /            │
+│                                        bc250_skip_sdma0 regime is RETIRED            │
+│  HSA_OVERRIDE_GFX_VERSION 10.1.0       load gfx1010 code objects; MUST be a shell env│
+│                                        var, NOT os.environ (HIP init already ran)    │
+│  amdgpu.ppfeaturemask     0xfff77ef7   boot param; keep bit 14 or pp_od_clk_voltage  │
+│                                        no-ops                                        │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ SDMA UNDER COMPUTE ─────────────────────────────────────────────────────────────────┐
+│  Firmware     navi12      the stock cyan_skillfish2 blob copies 0 bytes and never    │
+│                           drives user queues; the navi12 override (patch 26,         │
+│                           bc250_sdma_fw=navi12) is armed by default and falls back to│
+│                           stock on a missing-blob load-miss                          │
+│  Boot trap    early       TRAP_ENABLE written in gfx_resume (patch 27,               │
+│                           bc250_early_sdma_trap=1) — no more 500 ms fence-fallback   │
+│                           boot stalls                                                │
+│  Validated    H2D         22 hipMemcpy H2D copies, ≈1.1 GB, ALL OK (2026-08-20, n=2) │
+│                           — the kernel-level SDMA path is proven; hipfire's own      │
+│                           upload path still uses its CPU-memcpy workaround           │
+│  Fallback     19          on disk, retired — re-arm bc250_skip_sdma0=1 (steer user   │
+│                           queues to SDMA1) only if the firmware swap is reverted     │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ CAUTION — two MEC findings, not yet reconciled ─────────────────────────────────────┐
+│  From RADV/Vulkan work this manual documents the MEC as silicon-defective for non-   │
+│  atomic global stores ("MEC is dead, use the GFX ring", Chapter 6).  From the ROCm   │
+│  side the opposite holds: ROCm inference is production-stable THROUGH the KFD/MEC    │
+│  path, and an aligned MEC-firmware diff found zero divergent register accesses vs    │
+│  navi10.  Both cannot be fully true as stated; the likely reconciliation is that the │
+│  RADV finding is real but NARROWER than "MEC is dead".  Unresolved — see Chapter 6 → │
+│  ROCm / KFD Compute Path.  Unchanged practical rule: keep experimental non-atomic-   │
+│  store MEC paths in clearly-warned test tools; production ROCm inference is fine.    │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
           See: Mesa Userspace (the GFX-ring bypass) — Chapter 6 → compute dispatch paths
@@ -5743,11 +6080,16 @@ thereafter.
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ ENVIRONMENT VARIABLES ──────────────────────────────────────────────────────────────┐
-│  HSA_OVERRIDE_GFX_VERSION    10.1.0   force the gfx1010 code path — required         │
-│  HSA_FORCE_FINE_GRAIN_PCIE   1        redirect discrete-VRAM allocation to the       │
-│                                       system aperture — causes page faults on        │
-│                                       large allocations                              │
-│  GPU_ENABLE_WAVE32_MODE      -        force wave32 — untested                        │
+│  HSA_ENABLE_SDMA             1          required — SDMA0 is healthy with the navi12  │
+│                                         firmware override armed (patch 26); the =0   │
+│                                         regime is retired                            │
+│  HSA_OVERRIDE_GFX_VERSION    10.1.0     required — force the gfx1010 code path.  MUST│
+│                                         be a shell env var, NOT os.environ (HIP init │
+│                                         already happened)                            │
+│  HSA_FORCE_FINE_GRAIN_PCIE   1          redirect discrete-VRAM allocation to the     │
+│                                         system aperture — causes page faults on large│
+│                                         allocations                                  │
+│  GPU_ENABLE_WAVE32_MODE      -          force wave32 — untested                      │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─ ROCBLAS ELF RETARGET — Tensile kernels ship built for gfx1012 ──────────────────────┐
@@ -5773,13 +6115,49 @@ route, as opposed to device-name gating.
 RGA targets gfx1013 directly for register-usage and occupancy analysis.  CodeXL
 is archived, replaced by RGA/RGP/uProf.
 
+── WHAT WORKS · WHAT DOES NOT ───────────────────── validated on the production blade ──
+
+┌─ WHAT WORKS — HSA_ENABLE_SDMA=1 (+ the gfx-version override where noted) ────────────┐
+│  matmul fp32/fp16   ok    all sizes 512-4096                                         │
+│  conv2d (MIOpen)    ok    26/26 correct                                              │
+│  alloc ≤ 6 GB       ok    unified GDDR6                                              │
+│  multi-worker alias ok    0/4000 corruptions (patch 24/25)                           │
+│  SDMA H2D copies    ok    22 copies ≈1.1 GB, ALL OK — navi12 fw armed (2026-08-20,   │
+│                           n=2)                                                       │
+│  LoRA backward      ok    distilgpt2, 83 ms/step (needs the override)                │
+│  LLM inference      ok    85.7 tok/s, Qwen3.5 4B (hipfire; needs the override)       │
+│  bandwidth (magnum) ok    259 GB/s norot                                             │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ WHAT DOES NOT WORK ─────────────────────────────────────────────────────────────────┐
+│  bf16                hw    gfx1013 (gfx10.1) predates bfloat16 — use fp32 or         │
+│                            fp16+GradScaler                                           │
+│  rocBLAS small GEMM  sel   kernel-selection bug on gfx1013 — fixed by                │
+│                            HSA_OVERRIDE_GFX_VERSION=10.1.0                           │
+│  LoRA w/o override   sel   rocBLAS picks a broken variant — set the override as a    │
+│                            shell env var                                             │
+│  SDMA0 (stock fw)    fw    cyan_skillfish2_sdma.bin copies 0 bytes, completion never │
+│                            drops — fixed by the navi12 override (patch 26, armed by  │
+│                            default)                                                  │
+│  SDMA0 boot stalls   init  TRAP_ENABLE written late in init — FIXED by patch 27      │
+│                            (early TRAP_ENABLE in gfx_resume)                         │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+Native gfx1013 rocBLAS (PR #8838) produces code objects identical to gfx1010 (same
+ISA), so the env-var override achieves the same result and it is not worth building.
+The open compute defect — second-heavy-phase failures — is not on either list because
+it is unsolved; see Chapter 6 → ROCm / KFD Compute Path for the analysis and patches
+17/18.
+
 ┌─ CAUTION ────────────────────────────────────────────────────────────────────────────┐
-│  HIP dispatch reaches the GPU through KFD/MEC — restrict HIP kernels to the          │
-│  atomic-store-safe subset or use the GFX-ring paths (see Mesa Userspace).            │
-│  Allocate with hipHostMalloc(..., hipHostMallocMapped) +                             │
-│  hipHostGetDevicePointer() for zero-copy system-aperture access; plain               │
-│  hipMalloc routes through the BAR0-limited frame-buffer aperture unless              │
-│  apu_prefer_gtt is in effect.                                                        │
+│  HIP dispatch reaches the GPU through KFD/MEC.  For INFERENCE this path is           │
+│  production-stable; the RADV finding that the MEC is silicon-defective is real but   │
+│  narrower (Chapter 6 reconciles the conflict).  The still-open hazard is a second    │
+│  heavy GPU phase (training backward, multi-step) — treat those as unvalidated and    │
+│  run with the fault probe (patch 17) and TTM guards (18/20/22).  Allocate with       │
+│  hipHostMalloc(..., hipHostMallocMapped) + hipHostGetDevicePointer() for zero-copy   │
+│  system-aperture access; plain hipMalloc routes through the BAR0-limited frame-      │
+│  buffer aperture unless apu_prefer_gtt is in effect.                                 │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 
               See: KFD / HSA Compute Interface — GPUVM Memory Model (aperture routing)
@@ -5796,7 +6174,7 @@ grub-mkconfig -o /boot/grub/grub.cfg plus a reboot.
 ┌─ CRITICAL — the system does not work correctly without these ────────────────────────┐
 │  amdgpu.gartsize=16384            16 GB GTT pool — without it only ~256 MB is        │
 │                                   usable                                             │
-│  amdgpu.ppfeaturemask=0xffffffff  unlocks all SMU power management — without         │
+│  amdgpu.ppfeaturemask=0xfff77ef7  unlocks all SMU power management — without         │
 │                                   it the GPU is stuck at 1500 MHz                    │
 │  amdgpu.noretry=0                 enables page-fault retry — without it every        │
 │                                   GPU page fault is fatal                            │
@@ -5905,17 +6283,77 @@ GetDriverIfVersion.
 ```
 
 
+## arieltune apu — TUI & Core Map
+
+```
+── arieltune apu — TUI & CORE MAP ──────────────── system → CPU → Core Map → GPU → CU ──
+
+arieltune apu is the interactive cockpit for the board.  It renders as text (there
+are no image assets in this manual), one framed panel per subsystem, Tab-cycling the
+focus in the order system → CPU → Core Map → GPU → CU; only the focused panel lights
+and takes keys.  The Core Map panel (added with the 8-core unlock, Chapter 2) sits
+between CPU and GPU.  A representative screen with the board unlocked to 8C/16T and
+core 6 offlined at the OS layer:
+
+┌─ arieltune · apu ─────────────────────────────── BC-250 · gfx1013 · focus: Core Map ─┐
+│  system   ASRock BC-250    BIOS P3.00    kernel 7.0.9-cachyos    up 04:12:33         │
+├──────────────────────────────────────────────────────────────────────────────────────┤
+│  CPU      Zen 2  8C/16T    3.20 GHz    -35 mV    pkg 61°C    VDDCR_CPU 1.188 V       │
+├──────────────────────────────────────────────────────────────────────────────────────┤
+│  Core Map   UNLOCKED    mask 0xFF · 8C/16T · 1 offline                               │
+│             core     0     1     2     3     4     5     6     7                     │
+│             fw      ██    ██    ██    ██    ██    ██    ██    ██                     │
+│             os      ██    ██    ██    ██    ██    ██    ··    ██                     │
+│             [space] toggle  [←/→] select  [o]/[O] off/on  [u] unlock  [F] force      │
+│             [a] apply  [esc] cancel  [r] reset  [i] unit  [v] verify                 │
+├──────────────────────────────────────────────────────────────────────────────────────┤
+│  GPU      gfx1013  40 CU    2230 MHz    1006 mV    edge 74°C    GTT 3.1/16 GB        │
+├──────────────────────────────────────────────────────────────────────────────────────┤
+│  CU       ██████████ ██████████ ██████████ ██████████   40/40 active · SA0..SA3      │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ CORE MAP — rows, glyphs, keys ──────────────────────────────────────────────────────┐
+│  fw row          SMU mask bits — green ██ = core present in firmware (0x77 masks 3   │
+│                  and 7)                                                              │
+│  os row          live per-thread online state — ██ both threads, █· mixed, ··        │
+│                  offline/masked                                                      │
+│  [space]/[o]/[O] draft-then-apply: toggle / all-off / all-on edit the DRAFT only     │
+│                  (pending cells render yellow); nothing touches hardware until [a]   │
+│  [a]/[esc]/[r]   apply the draft · discard it · reset (online every CPU now — the    │
+│                  recovery route)                                                     │
+│  [u]             firmware unlock (same gates as cores apply); the fw row re-renders  │
+│                  from a live mask read, PENDING-REBOOT shows with a reminder         │
+│  [F]             forced unlock for an ABNORMAL mask — a modal popup shows the mask,  │
+│                  states the 0x98 write is all-or-nothing (0xFF), and owns every key  │
+│                  until [y] writes or [esc] cancels; the TUI still never reboots      │
+│  [i] / [v]       install the boot unit · run the stress-ng verify sweep in a worker  │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+An ABNORMAL mask renders the panel red with "writes refused" on every safe key; [F]
+stays the only writer.  Offlined CPUs lose their topology/ subtree on this kernel, so
+the grid falls back to core_id → online SMT sibling → adjacent-pair index, and online
+(all) writes every hotpluggable CPU dir with no topology dependency — offlined cores
+can always be recovered.
+
+        See: Chapter 2 → 8-Core CPU Unlock (the primitive, state machine, patch 28)
+             SMU / MP1 (queue 3, msg 0x98) — amdgpu kernel module (cs_eight_core_map)
+```
+
+
 # 6. Compute Stack
 
 ```
 ── COMPUTE STACK ──────────────────────────────── gfx1013 · GFX ring is the only path ──
 
-Compute on the BC-250 runs entirely on the graphics command processor.  The
-MEC async-compute engine is defective at the silicon level, so every production
-dispatch — Vulkan and OpenCL alike — is a PM4 packet stream submitted to the GFX
-ring.  This chapter documents the gfx1013 compute hardware: CU topology, ISA,
-register files, memory hierarchy, DMA engines, and the programming model the
-silicon enforces.
+Graphics-side compute on the BC-250 runs entirely on the graphics command
+processor: from RADV/Vulkan work the MEC async-compute engine reads as defective
+at the silicon level, so every Vulkan and OpenCL dispatch is a PM4 packet stream
+submitted to the GFX ring.  That "MEC is dead" finding is real but narrower than
+it sounds — ROCm inference is separately production-stable THROUGH the KFD/MEC
+path (see ROCm / KFD Compute Path, end of this chapter, which reconciles the two).
+This chapter documents the gfx1013 compute hardware: CU topology, ISA, register
+files, memory hierarchy, DMA engines, and the programming model the silicon
+enforces.
 
             gfx1013 die — 2 Shader Engines · 4 Shader Arrays · 40 CU
  ┌──────────────────────────────────────────────────────────────────────────┐
@@ -6636,6 +7074,14 @@ Consequences and the bypass:
  - Non-atomic global stores work on the GFX ring, confirming the defect is
    MEC-specific, not a general compute failure.
 
+Reconciliation with the ROCm finding: on the compute side, ROCm inference is
+production-stable THROUGH this KFD/MEC path, and GabriWar's aligned MEC-firmware diff
+found zero divergent register accesses versus navi10.  The "MEC is dead" result above
+is from RADV/Vulkan work and is most likely real but NARROWER than the headline — a
+specific access pattern RADV hits that the ROCm dispatch path mostly avoids.  It is
+unresolved, settled in neither direction.  See ROCm / KFD Compute Path (this chapter)
+for the full analysis and the open second-phase defect.
+
 ┌─ CAUTION ────────────────────────────────────────────────────────────────────────────┐
 │  Never rely on non-atomic global_store on the MEC path — silent corruption or a      │
 │  crash with no error signaled.  Disable the ROCm OpenCL ICD before any OpenCL        │
@@ -7044,4 +7490,109 @@ kernel variant:
         See: Vulkan Compute (shared ACO) — Wavefront & Execution Model — Ch.5
 ```
 
+## ROCm / KFD Compute Path
+
+```
+── ROCm / KFD COMPUTE PATH ─────────────── inference-stable · the second-phase defect ──
+
+This chapter is otherwise Vulkan/RADV-centric because that is the graphics-side
+production surface.  ROCm compute is the other real path: it runs through /dev/kfd
+and the MEC queues, and for inference it is production-stable.  The unsolved part is
+narrower than "ROCm is broken" — any workload with a SECOND heavy GPU phase (training
+backward pass, img2img reverse pass, multi-step generation) fails: the first phase
+completes, the next one dies.
+
+┌─ VERIFIED STACK ─────────────────────────────────────────────────────────────────────┐
+│  Hardware   BC-250     gfx1013 / Cyan Skillfish, 40 CU, ~17.2 GB unified GDDR6       │
+│  Kernel     7.0.9      cachyos, 25-patch build (modtree build2, srcversion C484A6D2) │
+│  ROCm       7.2.4      arch4edu                                                      │
+│  PyTorch    2.12.0a0   custom gfx1013 build                                          │
+│  CU unlock  patch 16   CC + SPI, no RLC (patch 12 hangs ROCm on the first KFD queue) │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ REQUIRED ENVIRONMENT ───────────────────────────────────────────────────────────────┐
+│  HSA_ENABLE_SDMA          1            SDMA0 healthy via the navi12 fw override,     │
+│                                        armed by default (patch 26); the =0 regime is │
+│                                        retired                                       │
+│  HSA_OVERRIDE_GFX_VERSION 10.1.0       gfx1010 objects; a SHELL env var, NOT         │
+│                                        os.environ (HIP init already ran)             │
+│  amdgpu.ppfeaturemask     0xfff77ef7   boot param; keep bit 14 or voltage writes no- │
+│                                        op                                            │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ WHAT WORKS / WHAT DOES NOT ─────────────────────────────────────────────────────────┐
+│  inference, matmul  ok    LLM 85.7 tok/s; matmul 512-4096; conv2d 26/26; bandwidth   │
+│                           259 GB/s                                                   │
+│  LoRA training      ok    distilgpt2 83 ms/step (with the gfx-version override)      │
+│  multi-proc alias   ok    0/4000 corruptions (TLB fix, patches 24/25)                │
+│  SDMA H2D copies    ok    22 copies ≈1.1 GB, ALL OK — navi12 fw armed (2026-08-20,   │
+│                           n=2)                                                       │
+│  bf16               no    gfx1013 predates bfloat16 — use fp32 or fp16               │
+│  second heavy phase OPEN  the defect below — training backward, img2img reverse,     │
+│                           multi-step                                                 │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+── THE MEC CONFLICT ────────────── this manual's Chapter 6 finding vs the ROCm result ──
+
+Elsewhere this chapter documents the MEC as silicon-defective for non-atomic global
+stores and concludes "MEC is dead, use the GFX ring" — a RADV/Vulkan-derived finding
+(see Command Processor & Microengines).  That conflicts with two things established
+on the compute side: ROCm inference is production-stable THROUGH the MEC path, and an
+aligned MEC-firmware diff found zero divergent register accesses versus navi10
+(98.49% identical; the earlier 76.5% figure was a byte-offset artifact).  Both cannot
+be fully true as stated.  The most likely reconciliation is that the RADV finding is
+real but NARROWER than "MEC is dead": a specific access pattern RADV hits that the
+ROCm dispatch path mostly avoids.  This is unresolved and should not be treated as
+settled in either direction — the RADV finding is retained, not deleted.
+
+── THE OPEN COMPUTE DEFECT ─── patches 17 measure · 18 contain · nothing claims a fix ──
+
+When the second-phase failure surfaces as a page fault rather than a HIP error, the
+faulting client is always SQC (inst) — the shader INSTRUCTION cache.  That places the
+defect before the fault: the wave's program counter was already wrong when it was
+issued, so the handler is reporting the symptom, not causing it.  The address is not
+random.
+
+┌─ FAULT SIGNATURE — 9 faults, separate boots, ASLR active ────────────────────────────┐
+│  Seven of nine share an exact shape: top byte 0xff, low 20 bits 0xbb000, only bits   │
+│  [39:20] moving.  The process's own code objects live at 0x7f… — and 0x7f → 0xff is  │
+│  ONE bit: bit 47, the canonical-form boundary.  The top byte of a 48-bit shader      │
+│  address is exactly COMPUTE_PGM_HI (bits [47:40]; see PM4 Dispatch → SH register     │
+│  map), so this is one wrong bit in an otherwise plausible entry-point address, not   │
+│  garbage.  Substituting 0x7f back yields addresses in the process's normal range.    │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+Patch 17 is the MEASUREMENT: it logs the raw interrupt vector and the bit-47-cleared
+candidate so the candidate can be checked against the faulting process's GPU VA map
+offline.  It changes no control flow and fixes nothing; it deliberately does NOT read
+COMPUTE_PGM_LO/HI (per-pipe CP registers behind GRBM indexing and srbm_mutex —
+reading them in hard-IRQ context would deadlock, and via debugfs amdgpu_regs hangs
+this board).  Gate with amdgpu.bc250_fault_probe.  Patch 18 (with 20/22) is
+CONTAINMENT: compute faults were escalating to kernel panics via a missing NULL check
+in TTM cleanup (CR2=0x18), turning every fault into a dead blade; with the guard the
+process dies and the machine survives.
+
+┌─ DELIBERATELY NOT SHIPPED AS A "FIX" ────────────────────────────────────────────────┐
+│  fault-handler retry / -EAGAIN — the entry describes a fault that already happened;  │
+│    re-reading returns the same data.                                                 │
+│  address rewriting in the handler — needs the predicate (addr>>44)==0xF, which also  │
+│    matches legal canonical high addresses; actively dangerous.                       │
+│  amdgpu_amdkfd_interrupt() queue reset — KFD's v10 path handles SQ interrupts only;  │
+│    the GMC vector is dropped.                                                        │
+│  warmup dispatches / HIP_LAUNCH_BLOCKING / AMD_SERIALIZE_KERNEL — change timing or   │
+│    hide the symptom; keep for bisection, not production.                             │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ CAUTION ────────────────────────────────────────────────────────────────────────────┐
+│  ROCm inference is fine; a training backward pass or any multi-step generation is    │
+│  NOT yet validated on this silicon and can fault or hang.  Run those with the fault  │
+│  probe (patch 17) and the TTM guards (18/20/22) so a fault costs a process, not a    │
+│  blade.  HSA_OVERRIDE_GFX_VERSION=10.1.0 must be a shell env var; setting it from    │
+│  os.environ after import does nothing because HIP already initialized.  Disable the  │
+│  ROCm OpenCL ICD before any OpenCL tool runs (see Command Processor & Microengines). │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+
+        See: Command Processor & Microengines (the MEC finding) — Ch.5 → KFD / HSA,
+             Applied Patch Ledger (17/18/20/22) — PM4 Dispatch (COMPUTE_PGM_HI)
+```
 
