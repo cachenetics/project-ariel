@@ -182,9 +182,12 @@ Patches that exist in the research tree but are left out of the curated series:
 ## Build
 
 `aputune build` materializes these patches, runs the `makepkg` flow (CC=gcc-15),
-installs the package, arms 40-CU via modprobe.d, rebuilds initramfs, and (with
-`--target user@host`) deploys + reboots. Verified end-to-end on a real BC-250
-running `linux-cachyos-bore-7.0.9`.
+installs the package, writes the modprobe.d drop-in (runlist flush + SDMA
+options), rebuilds initramfs, and (with `--target user@host`) deploys + reboots.
+40-CU routing is OFF by default (`bc250_cc_write_mode=0`, opt-in): pass
+`aputune build --full` to arm it at install, or `aputune apu cu enable` after
+validating the hardware. Verified end-to-end on a real BC-250 running
+`linux-cachyos-bore-7.0.9`.
 
 
 ## Patches 18-25: TTM crash fixes + TLB flush (GabriWar era)
