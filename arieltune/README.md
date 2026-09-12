@@ -24,7 +24,7 @@ The unified BC-250 tuning suite. One tabbed TUI, with a matching CLI, over four 
 
 The stock amdgpu driver keeps the BC-250 harvested: 24 CUs, locked clocks. arieltune ships a curated amdgpu kernel patch series that unlocks all 40 CUs, adds race-free SMU clock control, CPU clock limits, and live telemetry. It drives the whole kernel build and install for you: roughly a 30 minute build plus a reboot, always previewed first, and it only acts with `--run`.
 
-Build the series against `linux-cachyos` 7.0.9-1 (the plain `linux-cachyos/` PKGBUILD dir). Not 7.0.11+, which regresses BC-250 SDMA. The series lives in `crates/apu/patches/bc250-cachyos-7.0.9/`; every diff and what it does is explained in `SERIES.md` (patches that are on disk but not applied are marked there).
+Build the series against `linux-cachyos-bore` 7.0.9-1 (the `linux-cachyos-bore/` PKGBUILD dir - the plain `linux-cachyos/` dir builds a kernel release string the prebuilt nct6687 fan-telemetry module's vermagic won't match). Not 7.0.11+, which regresses BC-250 SDMA. The series lives in `crates/apu/patches/bc250-cachyos-7.0.9/`; every diff and what it does is explained in `SERIES.md` (patches that are on disk but not applied are marked there).
 
 ### Build dependencies
 
@@ -52,7 +52,7 @@ The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
    failures that look like patch bugs. The preflight reads the live carve and
    blocks the build until the BIOS is fixed.
 
-2. **Pin the linux-cachyos PKGBUILD** (arieltune cannot fetch this itself):
+2. **Pin the linux-cachyos-bore PKGBUILD** (arieltune cannot fetch this itself):
 
    ```sh
    git clone https://github.com/CachyOS/linux-cachyos.git ~/linux-cachyos
@@ -77,8 +77,8 @@ The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
 4. **Preview, then run the build** (~30 minutes; nothing is touched without `--run`):
 
    ```sh
-   sudo aputune build --pkgbuild ~/linux-cachyos/linux-cachyos          # preview
-   sudo aputune build --pkgbuild ~/linux-cachyos/linux-cachyos --run    # go
+   sudo aputune build --pkgbuild ~/linux-cachyos/linux-cachyos-bore          # preview
+   sudo aputune build --pkgbuild ~/linux-cachyos/linux-cachyos-bore --run    # go
    ```
 
 5. **Reboot and verify**:
