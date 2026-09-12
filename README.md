@@ -19,6 +19,13 @@ console-class compute for the cost of e-waste. All open, all reproducible, all d
   (WIKI / BIOS / APU / MEM): browse the firmware surface, tune GDDR6 memory timings, unlock
   and tune the APU (40-CU liberation, CPU/GPU/CU control), and read the hardware-verified
   BC-250 manual. Built on reverse-engineered SMU mailboxes and a liberated amdgpu.
+- **[llmtune](https://github.com/cachenetics/llmtune)** - once the board is liberated, serves
+  LLMs on it (llama.cpp orchestration, model hot-swap, OpenAI-compatible endpoint, fleet mode
+  for a rack of BC-250s).
+
+New board, starting from a fresh OS install: llmtune's
+[docs/bc250-complete-bringup.md](https://github.com/cachenetics/llmtune/blob/main/docs/bc250-complete-bringup.md)
+walks the whole path end to end, arieltune liberation through serving a model.
 
 ## Get it running
 
