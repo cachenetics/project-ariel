@@ -47,6 +47,18 @@ aborts in seconds with the exact missing packages instead of failing deep into t
 
 ### Liberation quick start (patched kernel)
 
+**Prerequisite: install arieltune itself first** - this whole section drives the `aputune`
+CLI, which doesn't exist yet on a fresh box. From the repo root (see the top-level
+[README](../README.md)):
+
+```sh
+git clone https://github.com/cachenetics/project-ariel.git
+cd project-ariel
+./install.sh
+```
+
+If `aputune --help` says command not found, that's this step - run it, then come back here.
+
 The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
 
 1. **BIOS**: set *UMA Frame Buffer Size* to **512M**. A different carve (e.g. 2G)
