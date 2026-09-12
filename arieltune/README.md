@@ -45,19 +45,27 @@ sudo pacman -S --needed gcc15 bc base-devel clang llvm lld pahole rust rust-bind
 aborts in seconds with the exact missing packages instead of failing deep into the
 ~30 minute build.
 
-### Liberation quick start (patched kernel)
+## Quick start
 
-**Prerequisite: install arieltune itself first** - this whole section drives the `aputune`
-CLI, which doesn't exist yet on a fresh box. From the repo root (see the top-level
-[README](../README.md)):
+Needs Rust (see *Build dependencies* above) and sudo.
 
 ```sh
 git clone https://github.com/cachenetics/project-ariel.git
 cd project-ariel
-./install.sh
+./install.sh    # release build + install to /usr/local/bin
+arieltune       # launch the TUI (opens on WIKI)
 ```
 
-If `aputune --help` says command not found, that's this step - run it, then come back here.
+Installs one binary, an `at` alias, and `aputune`/`memtune`/`biostune`/`wikitune` compat symlinks.
+
+```sh
+arieltune apu          # jump straight to a tab (or: arieltune --tab mem)
+arieltune apu <cmd>    # per-app CLI
+```
+
+TUI keys: `1`-`4` (or `F1`-`F4`) jump tabs, `Ctrl-Tab` cycles, `Ctrl-Q` quits.
+
+### Liberation quick start (patched kernel)
 
 The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
 
@@ -104,24 +112,6 @@ The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
 
 The build installs the kernel, arms `/etc/modprobe.d/aputune-40cu.conf`, and
 regenerates the initramfs for you.
-
-## Quick start
-
-Needs Rust (see *Build dependencies* above) and sudo.
-
-```sh
-./install.sh    # release build + install to /usr/local/bin
-arieltune       # launch the TUI (opens on WIKI)
-```
-
-Installs one binary, an `at` alias, and `aputune`/`memtune`/`biostune`/`wikitune` compat symlinks.
-
-```sh
-arieltune apu          # jump straight to a tab (or: arieltune --tab mem)
-arieltune apu <cmd>    # per-app CLI
-```
-
-TUI keys: `1`-`4` (or `F1`-`F4`) jump tabs, `Ctrl-Tab` cycles, `Ctrl-Q` quits.
 
 ## What gets unlocked
 
