@@ -33,9 +33,11 @@ distros, install Rust via [rustup.rs](https://rustup.rs) first. The patched-kern
 build then needs `gcc15`, `bc`, `base-devel`, the clang + thinLTO toolchain
 (`clang`, `llvm`, `lld`, `pahole`), and the kernel-Rust pieces (`rust`,
 `rust-bindgen`, `rust-src` — the shipped 7.0.9 config has `CONFIG_RUST=y`).
-`mkinitcpio` ships by default on CachyOS:
+`mkinitcpio` ships by default on CachyOS. On a fresh install, sync mirrors first - a live
+ISO's package database can be stale enough that a needed package 404s:
 
 ```sh
+sudo pacman -Syyu
 sudo pacman -S --needed gcc15 bc base-devel clang llvm lld pahole rust rust-bindgen rust-src
 ```
 
