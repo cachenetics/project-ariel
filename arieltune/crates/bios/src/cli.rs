@@ -69,12 +69,17 @@ pub enum Cmd {
         filter: Option<String>,
     },
     /// Show one setting: current value, options, default, category, storage. Read-only.
-    Get { name: String },
+    Get {
+        /// Setting name (see `bios dump` or `bios categories`).
+        name: String,
+    },
     /// Change CBS settings (AmdSetup) as NAME=VAL. Previews unless --write. Applies on reboot. Root.
     ///
     /// VAL is a number, 0xHEX, or an option label. EFI SetVariable path (NVRAM-clear recoverable).
     /// For OEM Setup settings use `oem-set` instead.
     Set {
+        /// One or more NAME=VAL (value, 0xHEX, or option label), CBS/AmdSetup
+        /// settings only (see `bios dump` for names).
         #[arg(required = true, value_name = "NAME=VAL")]
         assignments: Vec<String>,
         /// Actually write to AmdSetup. Applies on reboot.
@@ -97,6 +102,9 @@ pub enum Cmd {
     /// SUPERSEDED and usually ineffective (firmware locks OEM Setup before the boot shell runs); prefer
     /// `oem-set`. Recoverable by NVRAM clear, no SPI rig. After it applies, run `oem-clear`.
     OemStage {
+        /// One or more NAME=VAL (value or option label), OEM Setup settings
+        /// only (see `bios dump` for names) - prefer `oem-set` instead, see
+        /// above.
         #[arg(required = true, value_name = "NAME=VAL")]
         assignments: Vec<String>,
         /// Actually stage the files + set the one-shot boot entry (then reboot yourself).
@@ -180,6 +188,7 @@ pub enum ApcbCmd {
     ///
     /// --write flashes the APCB via in-system flashrom (brick-class) and needs a reboot. Backs up first.
     Enable {
+        /// CBS token id, e.g. 0x1501 (see `apcb status`).
         id: String,
         /// Actually flash the enable bit. Applies at the next cold boot.
         #[arg(long)]
@@ -192,6 +201,7 @@ pub enum ApcbCmd {
     ///
     /// --write flashes the APCB via in-system flashrom (brick-class) and needs a reboot. Backs up first.
     Disable {
+        /// CBS token id, e.g. 0x1501 (see `apcb status`).
         id: String,
         /// Actually flash the enable bit off. Applies at the next cold boot.
         #[arg(long)]

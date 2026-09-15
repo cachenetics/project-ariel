@@ -36,6 +36,9 @@ pub enum Cmd {
     },
     /// Stage individual timings as KEY=VAL (range-checked). Previews unless --write. Root.
     Set {
+        /// One or more KEY=VAL memory-timing assignments (see `mem dump` for
+        /// valid keys and their current values - a bad key/value here risks
+        /// a training failure on next boot).
         #[arg(required = true, value_name = "KEY=VAL")]
         assignments: Vec<String>,
         /// Actually write to CMOS. Applies on the next reboot (ABL trains it). Auto-backs-up first.

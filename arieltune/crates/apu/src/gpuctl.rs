@@ -57,7 +57,7 @@ pub fn force(mhz: u32) -> Result<ForceOutcome> {
             bail!(
                 "cannot raise the persisted GPU undervolt {old} -> {floor} mV (safe floor \
                  for {target} MHz): overdrive write failed — clock left UNCHANGED. \
-                 Release the voltage first, or retry as root."
+                 Fix overdrive (amdgpu.ppfeaturemask / root) or release the voltage first."
             );
         }
         vid_raised = Some((old, floor));

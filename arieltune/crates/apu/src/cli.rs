@@ -153,16 +153,23 @@ pub enum ProfileCmd {
     /// List built-in and custom profiles. Read-only.
     List,
     /// Show one profile and exactly what applying it would do. Read-only.
-    Show { name: String },
+    Show {
+        /// Profile name (see `apu profile list`).
+        name: String,
+    },
     /// Apply a profile (CU + GPU + CPU). Previews the plan; only actuates with --write.
     Apply {
+        /// Profile name (see `apu profile list`).
         name: String,
         /// Actually apply the profile to hardware (root; may arm 40-CU which needs a reboot).
         #[arg(long)]
         write: bool,
     },
     /// Delete a custom profile. Does not touch hardware.
-    Delete { name: String },
+    Delete {
+        /// Profile name (see `apu profile list`).
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -209,8 +216,8 @@ pub enum CuCmd {
     ///
     /// An unsafe (empty-array) saved profile is refused and factory-24 applied instead.
     RouteLoad {
-        /// Boot mode: verify the route actually took and retry until it does.
-        /// The umr write can silently no-op if the GPU is not ready right after boot,
+        /// Boot mode: verify the route actually took and retry until it does. The
+        /// umr write can silently no-op if the GPU is not ready right after boot,
         /// so the boot unit uses this. Fails loudly (journal) if it never verifies.
         #[arg(long)]
         boot: bool,
@@ -453,28 +460,6 @@ pub enum AcpiCmd {
     Install,
     /// Restore backed-up tables (or remove the override) and rebuild initramfs. Root.
     Revert,
-}
-
-/// Dispatch for `arieltune apu cores`.
-fn cmd_cores(action: CoreCmd) -> Result<()> {
-    match action {
-        CoreCmd::Status => crate::cores::status(),
-        CoreCmd::Apply {
-            reboot,
-            force_abnormal,
-        } => crate::cores::apply(reboot, force_abnormal),
-        CoreCmd::Boot => crate::cores::boot(),
-        CoreCmd::Install => crate::cores::install(),
-        CoreCmd::Uninstall => crate::cores::uninstall(),
-        CoreCmd::Verify { seconds } => crate::cores::verify(seconds),
-        CoreCmd::Acpi { action } => match action {
-            AcpiCmd::Status => crate::cores::acpi_status(),
-            AcpiCmd::Install => crate::cores::acpi_install(),
-            AcpiCmd::Revert => crate::cores::acpi_revert(),
-        },
-        CoreCmd::Offline { core } => crate::cores::offline(core),
-        CoreCmd::Online { core } => crate::cores::online(core),
-    }
 }
 
 /// Run one `arieltune apu` subcommand. The suite bin owns SIGPIPE, `Cli::parse`,
@@ -789,8 +774,11 @@ fn kat_row(h: &cutest::KatResult) {
 fn cmd_cu_test(localize: bool, probe: bool) -> Result<()> {
     if !cutest::available() {
         anyhow::bail!(
-            "health-test needs umr (routing) and a Vulkan ICD (RADV). \
-             install: pacman -S umr vulkan-radeon vulkan-icd-loader"
+            "health-test needs umr (routing) and a Vulkan ICD (RADV). umr is NOT in the \
+             Arch/CachyOS repos - install it via its PKGBUILD (`git clone \
+             https://gitlab.freedesktop.org/tomstdenis/umr ~/umr && cd ~/umr && makepkg -si`) \
+             or the cmake build in the `arieltune apu cu route` hint. \
+             RADV: pacman -S vulkan-radeon vulkan-icd-loader"
         );
     }
 
@@ -1534,6 +1522,28 @@ fn cmd_cpu(action: CpuCmd) -> Result<()> {
     Ok(())
 }
 
+/// Dispatch for `arieltune apu cores`.
+fn cmd_cores(action: CoreCmd) -> Result<()> {
+    match action {
+        CoreCmd::Status => crate::cores::status(),
+        CoreCmd::Apply {
+            reboot,
+            force_abnormal,
+        } => crate::cores::apply(reboot, force_abnormal),
+        CoreCmd::Boot => crate::cores::boot(),
+        CoreCmd::Install => crate::cores::install(),
+        CoreCmd::Uninstall => crate::cores::uninstall(),
+        CoreCmd::Verify { seconds } => crate::cores::verify(seconds),
+        CoreCmd::Acpi { action } => match action {
+            AcpiCmd::Status => crate::cores::acpi_status(),
+            AcpiCmd::Install => crate::cores::acpi_install(),
+            AcpiCmd::Revert => crate::cores::acpi_revert(),
+        },
+        CoreCmd::Offline { core } => crate::cores::offline(core),
+        CoreCmd::Online { core } => crate::cores::online(core),
+    }
+}
+
 fn cmd_patches(show: Option<String>) -> Result<()> {
     if let Some(id) = show {
         let found = patches::SERIES
@@ -1794,13 +1804,13 @@ fn parse_masks(masks: &[String]) -> anyhow::Result<[u32; 4]> {
     Ok(m)
 }
 
+/// Persist the just-applied CU routing so it survives reboots, snapshot the live
+/// masks to the profile + arm the boot re-apply service. Same as the TUI's apply.
 /// Boot route re-apply retry budget: up to ATTEMPTS tries, DELAY_S apart, so the
 /// route still lands if the GPU is not ready in the first seconds after boot.
 const BOOT_ROUTE_ATTEMPTS: u32 = 8;
 const BOOT_ROUTE_DELAY_S: u64 = 8;
 
-/// Persist the just-applied CU routing so it survives reboots, snapshot the live
-/// masks to the profile + arm the boot re-apply service. Same as the TUI's apply.
 fn persist_route() -> bool {
     curoute::save_profile().is_ok() && persist::enable_route().is_ok()
 }

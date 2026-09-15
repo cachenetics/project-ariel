@@ -21,17 +21,20 @@ pub enum Cmd {
     /// Show one section by id: readable text, or --json for the structured record. Read-only.
     Get {
         id: String,
+        /// Emit the structured record instead of readable text.
         #[arg(long)]
         json: bool,
     },
     /// Full-text search across every section (title, tagline, prose, blocks). --json for records. Read-only.
     Search {
         query: String,
+        /// Emit structured records instead of readable text.
         #[arg(long)]
         json: bool,
     },
     /// List every safety CAUTION across the manual. --json for records. Read-only.
     Safety {
+        /// Emit structured records instead of readable text.
         #[arg(long)]
         json: bool,
     },
