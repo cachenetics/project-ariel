@@ -244,7 +244,7 @@ impl Smm {
 
     /// Fire one SMI. Returns (status, returned 256-byte data buffer).
     fn ioctl(&self, mut op: Op) -> io::Result<(u8, [u8; MAXDATA])> {
-        let rc = unsafe { libc::ioctl(self.file.as_raw_fd(), SMIFLASH_DO, &mut op as *mut Op) };
+        let rc = unsafe { libc::ioctl(self.file.as_raw_fd(), SMIFLASH_DO as i32, &mut op as *mut Op) };
         if rc < 0 {
             return Err(io::Error::last_os_error());
         }

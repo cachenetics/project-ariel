@@ -61,7 +61,7 @@ fn dev_info() -> Option<[u8; 1024]> {
         let rc = unsafe {
             libc::ioctl(
                 f.as_raw_fd(),
-                DRM_IOCTL_AMDGPU_INFO as libc::c_ulong,
+                DRM_IOCTL_AMDGPU_INFO as i32,
                 &mut req as *mut _,
             )
         };
