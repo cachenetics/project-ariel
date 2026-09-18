@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 
 const DEV: &str = "/dev/bc250-smu";
 /// `_IOWR('B', 6, struct { u32 reg; u32 val; })`
-const SMN_READ: libc::c_ulong = 0xC008_4206;
+const SMN_READ: u64 = 0xC008_4206;
 const UMC_BASE: u32 = 0x0001_4000;
 /// umc_6_7_0 `regUMCCH0_0_EccCtrl` = dword 0x53 → byte 0x14C.
 const ECC_CTRL: u32 = UMC_BASE + 0x53 * 4;
@@ -47,7 +47,7 @@ fn smn_read(fd: i32, addr: u32) -> Option<u32> {
     let mut buf = [0u8; 8];
     buf[0..4].copy_from_slice(&addr.to_ne_bytes());
     // SAFETY: SMN_READ takes a *mut struct{u32 reg; u32 val} = our 8-byte buf.
-    let rc = unsafe { libc::ioctl(fd, SMN_READ, buf.as_mut_ptr()) };
+    let rc = unsafe { libc::ioctl(fd, SMN_READ as libc::Ioctl, buf.as_mut_ptr()) };
     (rc == 0).then(|| u32::from_ne_bytes([buf[4], buf[5], buf[6], buf[7]]))
 }
 
