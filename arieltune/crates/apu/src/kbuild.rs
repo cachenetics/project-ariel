@@ -43,6 +43,13 @@ const VERIFY_SSH_TIMEOUT_S: u64 = 10;
 /// Where the running aputune binary is staged on the target (same arch as the
 /// build host — this is exactly how the binary is already deployed).
 const VERIFY_REMOTE_BIN: &str = "/tmp/aputune-verify";
+/// Appended to every "no PKGBUILD dir" error so the fix is in the error, not
+/// just the README — a fresh CachyOS install has no pinned kernel source yet.
+const NO_PKGBUILD_HINT: &str = "get one with:\n  \
+    git clone https://github.com/CachyOS/linux-cachyos.git ~/linux-cachyos\n  \
+    git -C ~/linux-cachyos checkout 791fb8ea6d3cf7c85e596678c25c56fa140591be   # 7.0.9-1\n  \
+    aputune build --pkgbuild ~/linux-cachyos/linux-cachyos-bore --run\n\
+    (README: \"Liberation quick start\", step 2)";
 
 pub struct BuildOpts {
     /// Directory holding the CachyOS PKGBUILD (+ source tarball, or makepkg
@@ -622,7 +629,7 @@ fn post_extract_plan(
     let pkgbuild = opts
         .pkgbuild_dir
         .clone()
-        .context("no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD)")?;
+        .with_context(|| format!("no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD); {NO_PKGBUILD_HINT}"))?;
     let mut steps = Vec::new();
 
     // 1. apply each embedded patch into the extracted tree. Plain argv — no
@@ -731,10 +738,12 @@ pub fn build(opts: BuildOpts) -> Result<()> {
     if let Some(tgt) = &opts.target {
         valid_target(tgt)?;
     }
-    let pkgbuild = opts.pkgbuild_dir.clone().context(
-        "no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD); \
-             it must hold a CachyOS linux-cachyos-* PKGBUILD",
-    )?;
+    let pkgbuild = opts.pkgbuild_dir.clone().with_context(|| {
+        format!(
+            "no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD); \
+             it must hold a CachyOS linux-cachyos-* PKGBUILD\n{NO_PKGBUILD_HINT}"
+        )
+    })?;
     if !pkgbuild.join("PKGBUILD").exists() {
         bail!("no PKGBUILD in {}", pkgbuild.display());
     }
