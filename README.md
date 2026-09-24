@@ -44,6 +44,12 @@ arieltune                    # launch the TUI (opens on WIKI)
 `arieltune apu` (or `bios` / `mem` / `wiki`); everything is also scriptable from the CLI.
 See [`arieltune/README.md`](arieltune/README.md) for the full build/usage guide.
 
+A Rust toolchain is only enough to build `arieltune` itself. Building the *patched kernel*
+later (`arieltune apu build`/`liberate`) needs a bigger toolchain (gcc15, clang/llvm/lld,
+rust-bindgen, rust-src, and more) - follow [`arieltune/README.md`](arieltune/README.md)'s
+own "Build dependencies" section before running that step, do not assume the Rust toolchain
+above already covers it.
+
 ## Safety
 
 These tools **write hardware** - SMU registers, CMOS/NVRAM, SPI flash, memory training. A
