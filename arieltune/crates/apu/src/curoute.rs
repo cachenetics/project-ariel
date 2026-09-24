@@ -40,8 +40,10 @@ pub(crate) fn umr_bin() -> Result<&'static str> {
         }
     }
     bail!(
-        "umr not found - it is NOT in the Arch/CachyOS repos. It ships its own PKGBUILD, \
-         so the easiest install is makepkg (run as a NORMAL user, not root): `git clone \
+        "umr not found - it is NOT in the Arch/CachyOS official repos, but IS in the AUR: \
+         easiest install is an AUR helper (`pacman -S paru` if you don't have one, then \
+         `paru -S umr`). Without an AUR helper, it ships its own PKGBUILD - makepkg by hand \
+         (run as a NORMAL user, not root): `git clone \
          https://gitlab.freedesktop.org/tomstdenis/umr ~/umr && cd ~/umr && makepkg -si` \
          (lands in /usr/bin/umr). Or build in place with cmake (NOT meson) into /opt/umr, \
          which arieltune also searches: `git clone \
