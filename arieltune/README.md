@@ -81,20 +81,35 @@ The end-to-end flow from a fresh CachyOS BC-250 to a fully unlocked board:
    git -C ~/linux-cachyos checkout 791fb8ea6d3cf7c85e596678c25c56fa140591be   # 7.0.9-1
    ```
 
-3. **Arm the fleet kernel command line** (GRUB). Without it the PSP rejects every
-   firmware load and most patch features report dead:
+3. **Arm the fleet kernel command line.** Without it the PSP rejects every
+   firmware load and most patch features report dead. CachyOS installs default
+   to GRUB, but a fresh install can also come with Limine instead - if you are
+   not sure which you have, `test -f /etc/default/grub && echo grub || echo limine`.
+
+   **GRUB:**
 
    ```sh
    sudo sed -i 's|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT="nowatchdog nvme_load=YES splash loglevel=3 amdgpu.ppfeaturemask=0xfff77ef7 amdgpu.noretry=0 amdgpu.gpu_recovery=1 amdgpu.sched_hw_submission=2 mitigations=off ttm.pages_limit=3588867 ttm.page_pool_size=3588867 iommu=pt amd_iommu=on amdgpu.bc250_flush_by_runlist=1 amdgpu.bc250_sdma_fw=navi12"|' /etc/default/grub
    sudo grub-mkconfig -o /boot/grub/grub.cfg
    ```
 
-   The `sed` replaces `GRUB_CMDLINE_LINUX_DEFAULT` wholesale — that is the fleet
+   The `sed` replaces `GRUB_CMDLINE_LINUX_DEFAULT` wholesale - that is the fleet
    baseline. If your host carries other boot flags (disk encryption, `resume=`,
    GPU quirks), merge them into the same line manually instead of clobbering
    them. `mitigations=off` is a throughput choice for dedicated inference
    blades, not a liberation requirement: omit it (keep the kernel's default
    mitigations) if the host is not a dedicated inference box.
+
+   **Limine:** edit `/etc/default/limine` and set the same flags on the
+   `KERNEL_CMDLINE[default]` entry ([CachyOS's own bootloader-config docs](https://wiki.cachyos.org/configuration/boot_manager_configuration/)):
+
+   ```
+   KERNEL_CMDLINE[default]="nowatchdog nvme_load=YES splash loglevel=3 amdgpu.ppfeaturemask=0xfff77ef7 amdgpu.noretry=0 amdgpu.gpu_recovery=1 amdgpu.sched_hw_submission=2 mitigations=off ttm.pages_limit=3588867 ttm.page_pool_size=3588867 iommu=pt amd_iommu=on amdgpu.bc250_flush_by_runlist=1 amdgpu.bc250_sdma_fw=navi12"
+   ```
+
+   then `sudo limine-mkinitcpio` to apply. Same caveats as GRUB above: merge in
+   any existing flags instead of clobbering them, and drop `mitigations=off`
+   unless this is a dedicated inference box.
 
 4. **Preview, then run the build** (~30 minutes; nothing is touched without `--run`):
 
