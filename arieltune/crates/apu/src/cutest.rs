@@ -431,6 +431,23 @@ pub fn available() -> bool {
     curoute::available() && ariel_compute::vulkan_available()
 }
 
+/// What's actually missing when `available()` is false, and how to fix it —
+/// shared by the CLI bail and the TUI status line so the fix isn't CLI-only.
+/// Reuses `curoute`'s own umr-missing message (one source of truth for that
+/// install text) rather than a second, driftable copy of it here.
+pub fn unavailable_hint() -> String {
+    let umr_err = curoute::umr_bin().err().map(|e| e.to_string());
+    let vk_ok = ariel_compute::vulkan_available();
+    match (umr_err, vk_ok) {
+        (Some(umr), false) => {
+            format!("{umr}. Also needs Vulkan RADV: pacman -S vulkan-radeon vulkan-icd-loader")
+        }
+        (Some(umr), true) => umr,
+        (None, false) => "needs Vulkan RADV: pacman -S vulkan-radeon vulkan-icd-loader".into(),
+        (None, true) => String::new(),
+    }
+}
+
 /// Run the KAT against a routing config (does not save/restore — the caller owns
 /// the surrounding `apply(saved)`).
 fn run_config(vk: &Vk, masks: [u32; 4], label: String, golden: &[u32]) -> Result<KatResult> {

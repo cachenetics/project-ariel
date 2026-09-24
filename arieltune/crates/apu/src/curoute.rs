@@ -29,7 +29,7 @@ pub const FACTORY_MASK: u32 = 0x07;
 /// The four shader arrays, in grid order: (SE, SH).
 pub const ARRAYS: [(u32, u32); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
 
-fn umr_bin() -> Result<&'static str> {
+pub(crate) fn umr_bin() -> Result<&'static str> {
     for p in [
         "/usr/bin/umr",
         "/usr/local/bin/umr",
@@ -39,7 +39,16 @@ fn umr_bin() -> Result<&'static str> {
             return Ok(p);
         }
     }
-    bail!("umr not found — install it for live CU routing (e.g. pacman -S umr)")
+    bail!(
+        "umr not found - it is NOT in the Arch/CachyOS repos. It ships its own PKGBUILD, \
+         so the easiest install is makepkg (run as a NORMAL user, not root): `git clone \
+         https://gitlab.freedesktop.org/tomstdenis/umr ~/umr && cd ~/umr && makepkg -si` \
+         (lands in /usr/bin/umr). Or build in place with cmake (NOT meson) into /opt/umr, \
+         which arieltune also searches: `git clone \
+         https://gitlab.freedesktop.org/tomstdenis/umr /opt/umr && cd /opt/umr && \
+         cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build` \
+         (binary at /opt/umr/build/src/app/umr)"
+    )
 }
 
 /// DRI instance number for the amdgpu device (matches the debugfs dir).

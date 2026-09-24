@@ -773,13 +773,7 @@ fn kat_row(h: &cutest::KatResult) {
 
 fn cmd_cu_test(localize: bool, probe: bool) -> Result<()> {
     if !cutest::available() {
-        anyhow::bail!(
-            "health-test needs umr (routing) and a Vulkan ICD (RADV). umr is NOT in the \
-             Arch/CachyOS repos - install it via its PKGBUILD (`git clone \
-             https://gitlab.freedesktop.org/tomstdenis/umr ~/umr && cd ~/umr && makepkg -si`) \
-             or the cmake build in the `arieltune apu cu route` hint. \
-             RADV: pacman -S vulkan-radeon vulkan-icd-loader"
-        );
+        anyhow::bail!("health-test blocked: {}", cutest::unavailable_hint());
     }
 
     if probe {

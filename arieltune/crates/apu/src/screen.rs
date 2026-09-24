@@ -1503,7 +1503,7 @@ fn cu_key(app: &mut ApuScreen, code: KeyCode) {
                 app.cu_health.clear();
                 app.status = "health-testing 40 CU (KAT compute, ~a few seconds)…".into();
             } else {
-                app.status = "health-test needs umr + a Vulkan ICD (RADV)".into();
+                app.status = format!("health-test blocked: {}", cutest::unavailable_hint());
             }
         }
         KeyCode::Char('b') => {
@@ -1516,7 +1516,7 @@ fn cu_key(app: &mut ApuScreen, code: KeyCode) {
                 let s = curoute::shape(&app.cu_draft);
                 app.status = format!("benching draft ({} CU) — KAT compute…", s.cu);
             } else {
-                app.status = "bench needs umr + a Vulkan ICD (RADV)".into();
+                app.status = format!("bench blocked: {}", cutest::unavailable_hint());
             }
         }
         _ => {}
