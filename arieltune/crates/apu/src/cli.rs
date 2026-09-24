@@ -80,10 +80,13 @@ pub enum Cmd {
         #[command(subcommand)]
         action: CoreCmd,
     },
-    /// Build the liberation series into the system (patched kernel + arm 40-CU). Preview unless --run.
+    /// Build the liberation series into the system (patched kernel). Preview unless --run.
     ///
-    /// Rebuilds the kernel package and needs a REBOOT to take effect. Needs root. Preview by default;
-    /// pass --run to execute. DANGEROUS: this replaces your running kernel.
+    /// 40-CU routing is OFF by default (opt-in): the build installs the patched kernel with
+    /// `bc250_cc_write_mode=0` so you can validate the hardware first, then arm 40-CU with
+    /// `arieltune apu cu enable` (or re-run with --full to arm it at install). Rebuilds the
+    /// kernel package and needs a REBOOT to take effect. Needs root. Preview by default; pass
+    /// --run to execute. DANGEROUS: this replaces your running kernel.
     Build {
         /// CachyOS PKGBUILD dir (or set APUTUNE_PKGBUILD).
         #[arg(long, value_name = "DIR")]
@@ -91,6 +94,10 @@ pub enum Cmd {
         /// Deploy + install to a remote target (user@host) over ssh instead of the local box.
         #[arg(long, value_name = "USER@HOST")]
         target: Option<String>,
+        /// Arm the full 40-CU route at install (bc250_cc_write_mode=3). Default: OFF (opt-in) —
+        /// arm later with `arieltune apu cu enable` after validating your hardware.
+        #[arg(long)]
+        full: bool,
         /// Actually build and install. Default: preview the plan only.
         #[arg(long)]
         run: bool,
@@ -477,6 +484,7 @@ pub fn run(cmd: Cmd) -> Result<()> {
         Cmd::Build {
             pkgbuild,
             target,
+            full,
             run,
         } => {
             let mut opts = kbuild::BuildOpts::default();
@@ -485,6 +493,15 @@ pub fn run(cmd: Cmd) -> Result<()> {
             }
             opts.target = target;
             opts.run = run;
+            if full {
+                opts.cc_mode = 3;
+            } else {
+                println!(
+                    "40-CU routing OFF (default). Installing the patched kernel with \
+                     bc250_cc_write_mode=0; arm 40-CU later with `arieltune apu cu enable` \
+                     after validating the hardware, or re-run with --full to arm it now."
+                );
+            }
             kbuild::build(opts)
         }
         Cmd::Liberate {

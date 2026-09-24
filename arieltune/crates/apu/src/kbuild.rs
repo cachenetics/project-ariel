@@ -63,6 +63,9 @@ pub struct BuildOpts {
     pub target: Option<String>,
     /// Value armed in the modprobe.d drop-in (`bc250_cc_write_mode`):
     /// 3 = route all 40 CUs, 0 = patched kernel only (tuning without routing).
+    /// Defaults to 0 (opt-in): a fresh build installs the patched kernel with
+    /// CU routing OFF so the hardware can be validated first; arm 40-CU later
+    /// with `arieltune apu cu enable`.
     pub cc_mode: u32,
     /// Actually execute (default: preview only).
     pub run: bool,
@@ -81,7 +84,7 @@ impl Default for BuildOpts {
             work_dir: work,
             cc: std::env::var("APUTUNE_CC").unwrap_or_else(|_| "gcc-15".into()),
             target: None,
-            cc_mode: 3,
+            cc_mode: 0,
             run: false,
         }
     }
@@ -714,7 +717,7 @@ fn post_extract_plan(
     steps.push(Step {
         desc: format!(
             "install package + arm cc_write_mode={mode}{} + SDMA(navi12+trap, fw-gated) + initramfs{}",
-            if mode == 3 { " (40-CU)" } else { "" },
+            if mode == 3 { " (40-CU)" } else { " (CU routing off)" },
             opts.target
                 .as_ref()
                 .map(|t| format!(" + reboot ({t})"))
@@ -848,6 +851,13 @@ pub fn build(opts: BuildOpts) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_build_does_not_arm_40cu() {
+        // Issue #27: 40-CU routing is opt-in. A default build must NOT arm it;
+        // callers set cc_mode=3 explicitly (`build --full` / liberate `full`).
+        assert_eq!(BuildOpts::default().cc_mode, 0);
+    }
 
     #[test]
     fn target_validation() {
