@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
 # Build the BC-250-patched nct6687 fan-control driver and install it on a
 # BC-250 carrier board. Writable PWM fan control (the in-kernel nct6683 is
 # read-only; the BC-250 EC ignores its FAN_CFG-handshake writes).
@@ -11,10 +11,20 @@
 # Usage:
 #   On the board:   ./build-and-install.sh install <path-to-nct6687.ko>
 #   On a v4 host:   ./build-and-install.sh build <kernel-build-tree> <upstream-nct6687d-src>
-set -euo pipefail
+set -eu
 UPSTREAM=https://github.com/Fred78290/nct6687d.git
 UPSTREAM_COMMIT=cd735225a95e04dda3e2befd94ba77e1f7609dcc
 HERE=$(cd "$(dirname "$0")" && pwd)
+
+# Detect privilege elevation: sudo (most distros) or doas (Alpine)
+if command -v sudo >/dev/null 2>&1; then
+    SUDO_CMD=sudo
+elif command -v doas >/dev/null 2>&1; then
+    SUDO_CMD=doas
+else
+    echo "No privilege elevation found (need sudo or doas)" >&2
+    exit 1
+fi
 
 case "${1:-}" in
 build)
@@ -41,14 +51,14 @@ build)
 install)
   KO=${2:?path to prebuilt nct6687.ko}
   K=$(uname -r)
-  sudo install -Dm644 "$KO" "/lib/modules/$K/updates/nct6687.ko"
-  sudo depmod -a
-  printf 'blacklist nct6683\noptions nct6687 force=true\n' | sudo tee /etc/modprobe.d/bc250-nct6687.conf >/dev/null
-  echo nct6687 | sudo tee /etc/modules-load.d/bc250-nct6687.conf >/dev/null
-  sudo rm -f /etc/modprobe.d/nct6683.conf /etc/modules-load.d/nct6683.conf 2>/dev/null || true
-  lsmod | grep -q nct6687 && sudo rmmod nct6687 || true
-  lsmod | grep -q nct6683 && sudo rmmod nct6683 || true
-  sudo modprobe nct6687
+  "$SUDO_CMD" install -Dm644 "$KO" "/lib/modules/$K/updates/nct6687.ko"
+  "$SUDO_CMD" depmod -a
+  printf 'blacklist nct6683\noptions nct6687 force=true\n' | "$SUDO_CMD" tee /etc/modprobe.d/bc250-nct6687.conf >/dev/null
+  echo nct6687 | "$SUDO_CMD" tee /etc/modules-load.d/bc250-nct6687.conf >/dev/null
+  "$SUDO_CMD" rm -f /etc/modprobe.d/nct6683.conf /etc/modules-load.d/nct6683.conf 2>/dev/null || true
+  lsmod | grep -q nct6687 && "$SUDO_CMD" rmmod nct6687 || true
+  lsmod | grep -q nct6683 && "$SUDO_CMD" rmmod nct6683 || true
+  "$SUDO_CMD" modprobe nct6687
   echo "installed + loaded. verify: sensors | grep -A3 nct6686"
   ;;
 *)
