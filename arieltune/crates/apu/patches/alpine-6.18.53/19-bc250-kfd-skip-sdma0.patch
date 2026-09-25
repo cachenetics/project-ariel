@@ -1,0 +1,64 @@
+Subject: [PATCH] drm/amdkfd: BC-250 — keep user SDMA queues off engine 0
+
+SDMA0 loses its completion interrupt at every boot ("Fence fallback timer
+expired on ring sdma0" seen twice per boot on gfx1013). User queues landing on
+engine 0 spin forever (HSA_ENABLE_SDMA=1) or corrupt H2D copies (SDMA=0).
+Clear the even-numbered SDMA queue bits so user queues only use engine 1,
+leaving engine 0 to the kernel ring. Controlled by amdgpu.bc250_skip_sdma0=1.
+
+Note: GabriWar's docs/28 later showed the boot message is an init-order
+artifact (TRAP_ENABLE written late), not a lost interrupt in steady state —
+but the user-queue hang measured in his docs/29 is real on the stock cyan
+firmware, so this workaround is still what production ships.
+
+Hunks regenerated 2026-08-17 against linux-cachyos-bore-7.0.9 and byte-verified
+against the deployed build2 tree on blade 15 (snap-8fe794e8). The
+<linux/module.h> include is carried here (patch 25 also needs it; the deployed
+tree has a single addition).
+
+By Gabriel Duarte Guerra.
+---
+--- a/drivers/gpu/drm/amd/amdkfd/kfd_device_queue_manager.c
++++ b/drivers/gpu/drm/amd/amdkfd/kfd_device_queue_manager.c
+@@ -24,6 +24,7 @@
+ 
+ #include <linux/ratelimit.h>
+ #include <linux/printk.h>
++#include <linux/module.h>
+ #include <linux/slab.h>
+ #include <linux/list.h>
+ #include <linux/types.h>
+@@ -128,6 +129,12 @@ unsigned int get_num_xgmi_sdma_queues(struct device_queue_manager *dqm)
+ 		dqm->dev->kfd->device_info.num_sdma_queues_per_engine;
+ }
+ 
++static int bc250_skip_sdma0;
++module_param(bc250_skip_sdma0, int, 0444);
++MODULE_PARM_DESC(bc250_skip_sdma0,
++	"BC-250: 0=off 1=keep user SDMA queues off engine 0 (its completion IRQ is lost)");
++#define BC250_PCI_DEVICE_ID 0x13FE
++
+ static void init_sdma_bitmaps(struct device_queue_manager *dqm)
+ {
+ 	bitmap_zero(dqm->sdma_bitmap, KFD_MAX_SDMA_QUEUES);
+@@ -141,6 +148,20 @@ static void init_sdma_bitmaps(struct device_queue_manager *dqm)
+ 			dqm->dev->kfd->device_info.num_reserved_sdma_queues_per_engine);
+ 	bitmap_clear(dqm->xgmi_sdma_bitmap, 0, kfd_get_num_xgmi_sdma_engines(dqm->dev) *
+ 			dqm->dev->kfd->device_info.num_reserved_sdma_queues_per_engine);
++
++	if (bc250_skip_sdma0 &&
++	    dqm->dev->adev->pdev->device == BC250_PCI_DEVICE_ID) {
++		unsigned int num_sdma = kfd_get_num_sdma_engines(dqm->dev);
++		int i;
++		for (i = 0; i < get_num_sdma_queues(dqm); i++) {
++			unsigned int engine = i % num_sdma;
++			if (engine == 0)
++				bitmap_clear(dqm->sdma_bitmap, i, 1);
++		}
++		dev_info(dqm->dev->adev->dev,
++			 "BC-250: user SDMA queues restricted to engines 1..%u\n",
++			 num_sdma - 1);
++	}
+ }
+ 
+ void program_sh_mem_settings(struct device_queue_manager *dqm,

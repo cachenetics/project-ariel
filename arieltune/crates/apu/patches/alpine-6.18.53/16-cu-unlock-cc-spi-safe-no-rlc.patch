@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BC-250 Liberation Project <bc250@invalid>
+Date: Sun, 6 Jul 2026 00:00:00 +0000
+Subject: [PATCH] drm/amdgpu: BC-250 40 CU unlock — CC + SPI only, no RLC_PG write
+
+Re-enables all 40 harvested CUs on the AMD BC-250 (gfx1013 / Cyan Skillfish)
+by writing two hardware registers per shader array in gfx_v10_0_get_cu_info(),
+which runs after RLC/MEC firmware init in gfx_v10_0_hw_init():
+
+  1. CC_GC_SHADER_ARRAY_CONFIG = 0
+     Clears harvest enumeration mask so amdgpu driver, KFD, and RADV all
+     report 40 active CUs instead of the VBIOS-fused 24.
+
+  2. SPI_PG_ENABLE_STATIC_WGP_MASK = 0x1f
+     Opens the Shader Processor Input dispatch gate to all 5 WGPs per SA
+     (stock firmware programs 0x7 = WGPs 0-2 only). Without this, clearing
+     CC alone has zero compute effect.
+
+WHY RLC_PG_ALWAYS_ON_WGP_MASK IS *NOT* WRITTEN:
+
+  Writing RLC_PG_ALWAYS_ON_WGP_MASK with RLC firmware running causes the
+  RLC's per-WGP bring-up state machine to activate for WGPs 3-4. These
+  WGPs have been harvest-disabled since VBIOS POST; their handshake
+  registers (CGTS_CU_*) are uninitialized. The RLC stalls indefinitely
+  waiting for a WGP-ready ACK that never arrives, causing a system hang
+  on first rocBLAS / HSA launch. On BC-250, ppfeaturemask=0xfff73ef7
+  already disables global power gating, making the always-on mask
+  redundant. Omitting the write eliminates the RLC stall with no
+  functional loss.
+
+Controlled via module parameter: amdgpu.bc250_cc_write_mode
+  0 = off (default, safe)
+  1 = probe SE0/SH0 only (read + restore)
+  2 = enable SE0/SH0 only (single shader array)
+  3 = enable all shader arrays (full 40 CU)
+  4 = probe all shader arrays (read + restore)
+
+Requires: options amdgpu bc250_cc_write_mode=3
+
+This is a safer alternative to the existing 12-unlock patch which
+includes RLC_PG_ALWAYS_ON_WGP_MASK in mode 3. That path works for
+Vulkan-only workloads but causes ROCm/HSA hangs. This version is
+safe for both Vulkan (RADV) and ROCm (KFD/HSA) workloads.
+
+Certified: 2026-06-14 — llama.cpp ROCm service, q4_0 KV cache, clean dmesg.
+
+Signed-off-by: BC-250 Liberation Project <bc250@invalid>
+---
+diff --git a/gfx_v10_0.c b/gfx_v10_0.c
+index fc65fb3..c0f3044 100644
+--- a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+@@ -26,6 +26,14 @@
+ #include <linux/firmware.h>
+ #include <linux/module.h>
+ #include <linux/pci.h>
++
++/* BC-250 40 CU unlock: clears harvest mask + opens SPI dispatch to all WGPs
++ * RLC_PG_ALWAYS_ON_WGP_MASK intentionally omitted — see patch4_cu_unlock.py */
++static int bc250_cc_write_mode;
++module_param(bc250_cc_write_mode, int, 0444);
++MODULE_PARM_DESC(bc250_cc_write_mode,
++	"BC-250 40CU: 0=off 1=probe-SE0SH0 2=clear-SE0SH0 3=clear-all-SAs 4=probe-all-SAs");
++#define BC250_PCI_DEVICE_ID 0x13FE
+ #include "amdgpu.h"
+ #include "amdgpu_gfx.h"
+ #include "amdgpu_psp.h"
+@@ -10117,6 +10125,58 @@ static int gfx_v10_0_get_cu_info(struct amdgpu_device *adev,
+ 	amdgpu_gfx_parse_disable_cu(adev, disable_masks, 4, 2);
+ 
+ 	mutex_lock(&adev->grbm_idx_mutex);
++
++	/* ===== BC-250 40 CU UNLOCK PATCH START ===== */
++	/*
++	 * BC-250 (gfx1013 / Cyan Skillfish): VBIOS fuses 16 of 40 CUs inactive.
++	 * Re-enable by writing per-SA hardware registers while holding grbm_idx_mutex.
++	 * This runs after RLC/MEC firmware init in gfx_v10_0_hw_init().
++	 *
++	 * Registers written:
++	 *   CC_GC_SHADER_ARRAY_CONFIG = 0        clears harvest enumeration mask
++	 *   SPI_PG_ENABLE_STATIC_WGP_MASK = 0x1f opens SPI dispatch to all 5 WGPs
++	 *
++	 * RLC_PG_ALWAYS_ON_WGP_MASK is NOT written: with RLC firmware running,
++	 * this triggers the WGP bring-up state machine for WGPs 3-4 whose
++	 * handshake registers are uninitialized (harvested since VBIOS POST),
++	 * causing RLC deadlock -> HSA/rocBLAS hang on first KFD queue creation.
++	 * BC-250 has RLC_PG_CNTL=0 (PG globally off) so the write is redundant.
++	 */
++	if (bc250_cc_write_mode > 0 && adev->pdev->device == BC250_PCI_DEVICE_ID) {
++		int bc_se, bc_sh;
++		for (bc_se = 0; bc_se < adev->gfx.config.max_shader_engines; bc_se++) {
++			for (bc_sh = 0; bc_sh < adev->gfx.config.max_sh_per_se; bc_sh++) {
++				u32 bc_cc_orig, bc_cc_after, bc_spi_orig, bc_spi_after;
++				if (bc250_cc_write_mode == 2 && (bc_se > 0 || bc_sh > 0))
++					continue;
++				gfx_v10_0_select_se_sh(adev, bc_se, bc_sh, 0xffffffff, 0);
++				bc_cc_orig  = RREG32_SOC15(GC, 0, mmCC_GC_SHADER_ARRAY_CONFIG);
++				WREG32_SOC15(GC, 0, mmCC_GC_SHADER_ARRAY_CONFIG, 0);
++				bc_cc_after = RREG32_SOC15(GC, 0, mmCC_GC_SHADER_ARRAY_CONFIG);
++				bc_spi_orig  = RREG32_SOC15(GC, 0, mmSPI_PG_ENABLE_STATIC_WGP_MASK);
++				WREG32_SOC15(GC, 0, mmSPI_PG_ENABLE_STATIC_WGP_MASK, 0x1f);
++				bc_spi_after = RREG32_SOC15(GC, 0, mmSPI_PG_ENABLE_STATIC_WGP_MASK);
++				if (bc250_cc_write_mode == 1 || bc250_cc_write_mode == 4) {
++					/* probe mode: restore originals, log for diagnostics */
++					WREG32_SOC15(GC, 0, mmCC_GC_SHADER_ARRAY_CONFIG, bc_cc_orig);
++					WREG32_SOC15(GC, 0, mmSPI_PG_ENABLE_STATIC_WGP_MASK, bc_spi_orig);
++					dev_info(adev->dev,
++						"bc250-40cu-probe: se=%d sh=%d "
++						"CC=0x%08x->0x%08x SPI=0x%08x->0x%08x (restored)\n",
++						bc_se, bc_sh,
++						bc_cc_orig, bc_cc_after, bc_spi_orig, bc_spi_after);
++				} else {
++					dev_info(adev->dev,
++						"bc250-40cu-enable: mode=%d se=%d sh=%d "
++						"CC=0x%08x->0x%08x SPI=0x%08x->0x%08x\n",
++						bc250_cc_write_mode, bc_se, bc_sh,
++						bc_cc_orig, bc_cc_after, bc_spi_orig, bc_spi_after);
++				}
++			}
++		}
++		gfx_v10_0_select_se_sh(adev, 0xffffffff, 0xffffffff, 0xffffffff, 0);
++	}
++	/* ===== BC-250 40 CU UNLOCK PATCH END ===== */
+ 	for (i = 0; i < adev->gfx.config.max_shader_engines; i++) {
+ 		for (j = 0; j < adev->gfx.config.max_sh_per_se; j++) {
+ 			bitmap = i * adev->gfx.config.max_sh_per_se + j;
+-- 
+2.45.0

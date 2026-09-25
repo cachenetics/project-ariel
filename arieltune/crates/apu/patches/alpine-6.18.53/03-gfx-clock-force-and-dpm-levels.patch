@@ -1,0 +1,88 @@
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 17:39:53.057034536 +0000
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 17:39:25.811646188 +0000
+@@ -602,6 +602,76 @@
+ 	return 0;
+ }
+ 
++/*
++ * cyan_skillfish_set_soft_freq_limited_range - set GFX freq range via PMFW
++ *
++ * BC-250 PMFW exposes ForceGfxFreq (0x39) / UnForceGfxFreq (0x3A) for direct
++ * GFX clock locking. min == max -> lock at that frequency; min != max ->
++ * release the lock (PMFW DPM picks within the band).
++ *
++ * Frequencies in MHz, must lie within [CYAN_SKILLFISH_SCLK_MIN,
++ * CYAN_SKILLFISH_SCLK_MAX].
++ */
++static int cyan_skillfish_set_soft_freq_limited_range(struct smu_context *smu,
++						      enum smu_clk_type clk_type,
++						      uint32_t min,
++						      uint32_t max,
++						      bool automatic)
++{
++	if (clk_type != SMU_GFXCLK && clk_type != SMU_SCLK)
++		return -EINVAL;
++
++	if (automatic || min != max)
++		return smu_cmn_send_smc_msg(smu, SMU_MSG_UnForceGfxFreq, NULL);
++
++	if (min < CYAN_SKILLFISH_SCLK_MIN || min > CYAN_SKILLFISH_SCLK_MAX)
++		return -EINVAL;
++
++	return smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_ForceGfxFreq,
++					       min, NULL);
++}
++
++/*
++ * cyan_skillfish_set_performance_level - apply preset performance level
++ *
++ * Maps standard amd_dpm_forced_level values to BC-250 GFX clock states:
++ *   HIGH / PROFILE_PEAK     -> ForceGfxFreq(MAX)
++ *   LOW  / PROFILE_MIN_SCLK -> ForceGfxFreq(MIN)
++ *   AUTO / PROFILE_STANDARD -> UnForceGfxFreq (PMFW DPM resumes)
++ *
++ * MANUAL is no-op here; userspace then writes pp_dpm_sclk via
++ * set_soft_freq_limited_range.
++ */
++static int cyan_skillfish_set_performance_level(struct smu_context *smu,
++						enum amd_dpm_forced_level level)
++{
++	int ret;
++
++	switch (level) {
++	case AMD_DPM_FORCED_LEVEL_HIGH:
++	case AMD_DPM_FORCED_LEVEL_PROFILE_PEAK:
++		ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_ForceGfxFreq,
++						      CYAN_SKILLFISH_SCLK_MAX, NULL);
++		break;
++	case AMD_DPM_FORCED_LEVEL_LOW:
++	case AMD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK:
++		ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_ForceGfxFreq,
++						      CYAN_SKILLFISH_SCLK_MIN, NULL);
++		break;
++	case AMD_DPM_FORCED_LEVEL_AUTO:
++	case AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD:
++		ret = smu_cmn_send_smc_msg(smu, SMU_MSG_UnForceGfxFreq, NULL);
++		break;
++	case AMD_DPM_FORCED_LEVEL_MANUAL:
++		ret = 0;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return ret;
++}
++
+ static const struct pptable_funcs cyan_skillfish_ppt_funcs = {
+ 
+ 	.check_fw_status = smu_v11_0_check_fw_status,
+@@ -617,6 +687,8 @@
+ 	.get_gpu_metrics = cyan_skillfish_get_gpu_metrics,
+ 	.od_edit_dpm_table = cyan_skillfish_od_edit_dpm_table,
+ 	.get_dpm_ultimate_freq = cyan_skillfish_get_dpm_ultimate_freq,
++	.set_soft_freq_limited_range = cyan_skillfish_set_soft_freq_limited_range,
++	.set_performance_level = cyan_skillfish_set_performance_level,
+ 	.register_irq_handler = smu_v11_0_register_irq_handler,
+ 	.notify_memory_pool_location = smu_v11_0_notify_memory_pool_location,
+ 	.set_driver_table_location = smu_v11_0_set_driver_table_location,
