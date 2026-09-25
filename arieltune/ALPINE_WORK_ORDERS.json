@@ -1,0 +1,183 @@
+{
+  "orders": [
+    {
+      "chunk": "1-500 (lines 1-500)",
+      "issues": [
+        {
+          "severity": "high",
+          "type": "Arch-specific build tooling",
+          "description": "PKGBUILD is Arch Linux-specific (pacman-based). Alpine uses apk/PKG build files. CLI help text references 'CachyOS PKGBUILD dir'.",
+          "locations": [
+            {
+              "function": "Cmd::Build",
+              "lines": "93-95"
+            },
+            {
+              "function": "Cmd::Liberate",
+              "lines": "104-106"
+            ]
+        },
+        {
+          "severity": "high",
+          "type": "systemd service references in CLI help text",
+          "description": "CLI help text references systemd .service unit names. Alpine uses OpenRC runlevels/scripts. These are user-facing doc strings; actual service files are elsewhere in repo but CLI must be updated to mention OpenRC equivalents.",
+          "locations": [
+            {
+              "function": "CuCmd::RouteForget",
+              "lines": "259"
+            },
+            {
+              "function": "GpuCmd::ApplyBoot",
+              "lines": "229"
+            },
+            {
+              "function": "GpuCmd::ApplySavedForce",
+              "lines": "231"
+            },
+            {
+              "function": "CpuCmd::ApplySaved",
+              "lines": "377"
+            },
+            {
+              "function": "CoreCmd::Boot",
+              "lines": "423"
+            },
+            {
+              "function": "CoreCmd::Install",
+              "lines": "426"
+            },
+            {
+              "function": "CoreCmd::Uninstall",
+              "lines": "427"
+            ]
+        },
+        {
+          "severity": "high",
+          "type": "Arch initramfs / initcpio references",
+          "description": "Help text references 'initramfs' and 'initcpio' (Arch/Dracut terminology). Alpine uses a different initramfs mechanism (mkimage/initramfs).",
+          "locations": [
+            {
+              "function": "CoreCmd::Acpi::Install",
+              "lines": "438-440"
+            },
+            {
+              "function": "CoreCmd::Acpi::Revert",
+              "lines": "441"
+            ]
+        ]
+    },
+    {
+      "chunk": "501-800 (lines 501-800)",
+      "issues": [
+        {
+          "severity": "high",
+          "type": "Arch initramfs tool in output",
+          "description": "CLI prints `mkinitcpio -P` (Arch-specific initramfs rebuild tool). Alpine uses a different initramfs mechanism.",
+          "locations": [
+            {
+              "function": "CuCmd::Enable",
+              "lines": "601"
+            ]
+        },
+        {
+          "severity": "high",
+          "type": "Arch install instructions in error message",
+          "description": "Error message for cu health-test shows PKGBUILD/makepkg + pacman install instructions for umr and RADV. Alpine users need apk-based install instructions.",
+          "locations": [
+            {
+              "function": "cmd_cu_test",
+              "lines": "790-795"
+            ]
+        ]
+    },
+  {
+  "chunk": "801-900 (lines 801-900)",
+  "issues": [
+  {
+  "severity": "low",
+  "type": "generic-service-term",
+  "description": 'The phrase "boot re-apply service" (line ~898) uses generic terminology. While not systemd-specific, Alpine users reading help/output will expect OpenRC runlevel/script references. The actual service-installation logic lives in the persist module; CLI just prints a warning here. Consider updating the warning message to "boot re-apply unit" or mention both systemd and OpenRC.',
+  "locations": [
+  {
+  "function": "cmd_gpu (GpuCmd::Force)",
+  "lines": "898-903"
+  ]
+  ]
+
+  ]
+}
+,
+{
+  "chunk": "cores.rs (full file, ~1000+ lines)",
+  "issues": [
+  {
+  "severity": "high",
+  "type": "systemd service unit format",
+  "description": "The entire boot() and install() functions write a systemd .service unit file with systemd directives (Type=oneshot, RemainAfterExit=yes, WantedBy=multi-user.target, After=multi-user.target). Alpine uses OpenRC runscripts instead. The UNIT_NAME constant references 'aputune-cores.service' and UNIT_PATH is '/etc/systemd/system/'. All systemctl invocations (daemon-reload, enable, disable, reboot) are systemd-specific.",
+  "locations": [
+  {
+  "function": "CoreState::label",
+  "lines": "79-86"
+  },
+  {
+  "function": "UNIT_NAME / UNIT_PATH constants",
+  "lines": "41-42"
+  },
+  {
+  "function": "install() — unit file template",
+  "lines": "392-403"
+  },
+  {
+  "function": "install() — systemctl calls",
+  "lines": "404-410"
+  },
+  {
+  "function": "uninstall() — systemctl calls",
+  "lines": "414-420"
+  },
+  {
+  "function": "boot() — OcQ3 interaction",
+  "lines": "369-390"
+  },
+  {
+  "function": "set_warm_reboot()",
+  "lines": "357-361"
+  }
+  ]
+  },
+  {
+  "severity": "high",
+  "type": "Arch mkinitcpio / initramfs tooling",
+  "description": "acpi_install() and acpi_revert() are entirely Arch-specific: references to /etc/mkinitcpio.conf, parsing HOOKS=(...) syntax, injecting 'acpi_override' hook, running 'mkinitcpio -P'. ACPI override directory is /etc/initcpio/. These functions are unusable on Alpine which uses mkimage / different initramfs mechanisms. The constants MKINITCPIO_CONF, ACPI_OVERRIDE_DIR, ACPI_BACKUP_DIR are Arch paths.",
+  "locations": [
+  {
+  "function": "MKINITCPIO_CONF / ACPI_OVERRIDE_DIR / ACPI_BACKUP_DIR constants",
+  "lines": "43-47"
+  },
+  {
+  "function": "acpi_status()",
+  "lines": "522-532"
+  },
+  {
+  "function": "acpi_install() — mkinitcpio.conf parsing + mkinitcpio -P",
+  "lines": "536-590"
+  },
+  {
+  "function": "acpi_revert() — mkinitcpio -P",
+  "lines": "594-613"
+  }
+  ]
+  },
+  {
+  "severity": "medium",
+  "type": "systemctl reboot",
+  "description": "set_warm_reboot() sets /sys/kernel/reboot/mode (this path is kernel-level and works on all Linux including Alpine), but the actual reboot uses systemctl reboot which is systemd-specific. On Alpine, a simple 'reboot' command or /sys/class/smi/reboot would be needed. The warm reboot mode itself (writing to /sys/kernel/reboot/mode) should be fine on Alpine.",
+  "locations": [
+  {
+  "function": "apply() — warm_reboot branch",
+  "lines": "342-354"
+  }
+  ]
+  }
+  ]
+}

@@ -16,6 +16,44 @@ UPSTREAM=https://github.com/Fred78290/nct6687d.git
 UPSTREAM_COMMIT=cd735225a95e04dda3e2befd94ba77e1f7609dcc
 HERE=$(cd "$(dirname "$0")" && pwd)
 
+# Detect kernel build tree — checks common paths across distros.
+# Sets KBUILD_TREE to the first valid tree found.
+detect_kbuild_tree() {
+  local kver="$(uname -r)"
+  local cands="
+    /lib/modules/${kver}/build
+    /lib/modules/${kver}/source
+    /usr/src/linux-${kver}
+    /usr/src/linux
+  "
+  for c in $cands; do
+    if [ -f "$c/Makefile" ]; then
+      KBUILD_TREE="$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Resolve KBUILD_TREE: user-passed arg > auto-detected > error.
+resolve_kbuild_tree() {
+  if [ -n "${1:-}" ]; then
+    KBUILD_TREE="$1"
+  elif detect_kbuild_tree; then
+    : # found above
+  else
+    echo "Error: no kernel build tree found." >&2
+    echo "Expected at one of:" >&2
+    echo "  /lib/modules/$(uname -r)/build" >&2
+    echo "  /lib/modules/$(uname -r)/source" >&2
+    echo "  /usr/src/linux-$(uname -r)" >&2
+    echo "  /usr/src/linux" >&2
+   echo "Install kernel headers (e.g. apk add linux-headers) or pass the path:" >&2
+   echo "  $0 build /path/to/kbuild-tree" >&2
+  exit 1
+  fi
+}
+
 # Detect privilege elevation: sudo (most distros) or doas (Alpine)
 if command -v sudo >/dev/null 2>&1; then
     SUDO_CMD=sudo
@@ -28,7 +66,8 @@ fi
 
 case "${1:-}" in
 build)
-  KBUILD=${2:?kernel build tree, e.g. /path/to/kbuild}
+  resolve_kbuild_tree "${2:-}"
+  KBUILD="$KBUILD_TREE"
   SRC=${3:-/tmp/nct6687d}
   [ -d "$SRC/.git" ] || git clone "$UPSTREAM" "$SRC"
   git -C "$SRC" checkout "$UPSTREAM_COMMIT"
@@ -62,5 +101,5 @@ install)
   echo "installed + loaded. verify: sensors | grep -A3 nct6686"
   ;;
 *)
-  echo "usage: $0 build <kbuild-tree> [upstream-src] | install <nct6687.ko>"; exit 1;;
+  echo "usage: $0 build [kbuild-tree] [upstream-src] | install <nct6687.ko>"; exit 1;;
 esac
