@@ -193,17 +193,17 @@ detect_pkgmgr
 case "${1:-}" in
 build)
 		resolve_kbuild_tree "${2:-}"
-		do_build "$2" "$3"
+		do_build "${2:-}" "${3:-}"
 		;;
 all)
 		resolve_kbuild_tree "${2:-}"
 		SRC="${3:-/tmp/nct6687d}"
-		do_build "$2" "$3"
+		do_build "${2:-}" "${3:-}"
 		# install phase
 		do_install "$SRC"
 		;;
 install)
-	do_install "$2"
+	do_install "${2:-}"
 	;;
 *)
 	echo "usage: $0 build [kbuild-tree] [upstream-src] | all [kbuild-tree] [upstream-src] | install <nct6687.ko>"; exit 1
