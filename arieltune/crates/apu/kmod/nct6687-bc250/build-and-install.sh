@@ -24,21 +24,21 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 detect_os() {
 		# /etc/os-release is standard on virtually all modern distros
 		if [ -f /etc/os-release ]; then
-			OS_ID="$(. /etc/os-release && echo "${ID:-}")"
+			OS_ID="$(. /etc/os-release && echo "${ID:-}")" || true
 		fi
 		# Alpine check (also has /etc/alpine-release)
 		if [ -f /etc/alpine-release ]; then
 			OS_ID=alpine
 		fi
 		case "$OS_ID" in
-			alpine)    OS_NAME=alpine    ;;
-			cachyos)   OS_NAME=cachyos  ;;
+			alpine)  OS_NAME=alpine  ;;
+			cachyos)  OS_NAME=cachyos  ;;
 			ubuntu|debian) OS_NAME=debian ;;
-			fedora)    OS_NAME=fedora   ;;
-			arch)      OS_NAME=arch     ;;
-			*)          OS_NAME="$OS_ID"  ;;
+			fedora)  OS_NAME=fedora  ;;
+			arch)    OS_NAME=arch  ;;
+			*)    OS_NAME="$OS_ID" ;;
 		esac
-		[ -z "${OS_NAME:-}" ] && OS_NAME=generic
+		if [ -z "${OS_NAME:-}" ]; then OS_NAME=generic; fi
 }
 
 # ── Privilege elevation ──────────────────────────────────────────────────────
@@ -56,12 +56,11 @@ detect_elevation() {
 
 # ── Package manager ─────────────────────────────────────────────────────────
 detect_pkgmgr() {
-		PKG_MGR=""
-		command -v apt >/dev/null 2>&1     && PKG_MGR=apt
-		command -v apk >/dev/null 2>&1     && PKG_MGR=apk
-		command -v pacman >/dev/null 2>&1  && PKG_MGR=pacman
-		command -v dnf >/dev/null 2>&1     && PKG_MGR=dnf
-		command -v yum >/dev/null 2>&1     && PKG_MGR=yum
+		if command -v apt >/dev/null 2>&1; then PKG_MGR=apt; fi
+		if command -v apk >/dev/null 2>&1; then PKG_MGR=apk; fi
+		if command -v pacman >/dev/null 2>&1; then PKG_MGR=pacman; fi
+		if command -v dnf >/dev/null 2>&1; then PKG_MGR=dnf; fi
+		if command -v yum >/dev/null 2>&1; then PKG_MGR=yum; fi
 }
 
 # ── Install kernel headers / kbuild tree ─────────────────────────────────────
