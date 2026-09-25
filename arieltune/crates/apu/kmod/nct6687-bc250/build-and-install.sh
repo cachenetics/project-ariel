@@ -31,12 +31,12 @@ detect_os() {
 			OS_ID=alpine
 		fi
 		case "$OS_ID" in
-			alpine)  OS_NAME=alpine  ;;
-			cachyos)  OS_NAME=cachyos  ;;
+			alpine)  OS_NAME=alpine  ;;
+			cachyos) OS_NAME=cachyos ;;
 			ubuntu|debian) OS_NAME=debian ;;
-			fedora)  OS_NAME=fedora  ;;
-			arch)    OS_NAME=arch  ;;
-			*)    OS_NAME="$OS_ID" ;;
+			fedora)  OS_NAME=fedora  ;;
+			arch)    OS_NAME=arch    ;;
+			*)       OS_NAME="$OS_ID" ;;
 		esac
 		if [ -z "${OS_NAME:-}" ]; then OS_NAME=generic; fi
 }
@@ -186,12 +186,12 @@ do_install() {
 
 # ── Auto-detect everything on startup ──────────────────────────────────────
 detect_os
-	detect_elevation
-	detect_pkgmgr
+detect_elevation
+detect_pkgmgr
 
 # ── Main dispatch ───────────────────────────────────────────────────────────
 case "${1:-}" in
-build) 
+build)
 		resolve_kbuild_tree "${2:-}"
 		do_build "$2" "$3"
 		;;
