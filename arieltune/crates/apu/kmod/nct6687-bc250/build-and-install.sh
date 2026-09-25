@@ -9,9 +9,10 @@
 # x86-64 build host) against the board's kernel build tree, then copy the .ko over.
 #
 # Usage:
-#   On the board:   ./build-and-install.sh install <path-to-nct6687.ko>
-#   On a v4 host:  ./build-and-install.sh build <kernel-build-tree> <upstream-nct6687d-src>
-#   Combined mode: ./build-and-install.sh all <kbuild-tree> <upstream-src>
+#  On the board:  ./build-and-install.sh install <path-to-nct6687.ko>
+#  On a v4 host:  ./build-and-install.sh build [kernel-build-tree] [upstream-nct6687d-src]
+#  Combined mode: ./build-and-install.sh all [kbuild-tree] [upstream-src]
+#  Both args auto-detect when omitted; pass nothing for defaults.
 set -eu
 UPSTREAM=https://github.com/Fred78290/nct6687d.git
 UPSTREAM_COMMIT=cd735225a95e04dda3e2befd94ba77e1f7609dcc
@@ -67,12 +68,7 @@ fi
 
 case "${1:-}" in
 build)
-	# Validate: build needs a kbuild-tree argument
-	if [ $# -lt 2 ]; then
-		echo "Error: build requires <kbuild-tree> argument." >&2
-		echo "usage: $0 build <kbuild-tree> [upstream-src]" >&2
-		exit 1
-	fi
+	# Resolve: kbuild-tree defaults to auto-detect; upstream-src defaults to /tmp/nct6687d
 	resolve_kbuild_tree "${2:-}"
 	KBUILD="$KBUILD_TREE"
 	SRC=${3:-/tmp/nct6687d}
@@ -96,12 +92,7 @@ build)
 	;;
 all)
 	# Combined build + install mode.
-	# Usage: ./build-and-install.sh all <kbuild-tree> [upstream-src]
-	if [ $# -lt 2 ]; then
-		echo "Error: all requires <kbuild-tree> argument." >&2
-		echo "usage: $0 all <kbuild-tree> [upstream-src]" >&2
-		exit 1
-	fi
+	# Resolve: kbuild-tree defaults to auto-detect; upstream-src defaults to /tmp/nct6687d
 	# --- build phase ---
 	resolve_kbuild_tree "${2:-}"
 	KBUILD="$KBUILD_TREE"
@@ -145,5 +136,5 @@ install)
 	echo "installed + loaded. verify: sensors | grep -A3 nct6686"
 	;;
 *)
-	echo "usage: $0 build <kbuild-tree> [upstream-src] | all <kbuild-tree> [upstream-src] | install <nct6687.ko>"; exit 1;;
+	echo "usage: $0 build [kbuild-tree] [upstream-src] | all [kbuild-tree] [upstream-src] | install <nct6687.ko>"; exit 1;;
 esac
