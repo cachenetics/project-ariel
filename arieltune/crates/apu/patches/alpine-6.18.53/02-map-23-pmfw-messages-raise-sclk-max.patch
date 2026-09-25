@@ -1,0 +1,46 @@
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-04-27 15:50:41.000000000 +0000
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 17:15:29.308196277 +0000
+@@ -46,7 +46,7 @@
+ 
+ /* unit: MHz */
+ #define CYAN_SKILLFISH_SCLK_MIN			1000
+-#define CYAN_SKILLFISH_SCLK_MAX			2000
++#define CYAN_SKILLFISH_SCLK_MAX			2500
+ 
+ /* unit: mV */
+ #define CYAN_SKILLFISH_VDDC_MIN			700
+@@ -76,10 +76,33 @@
+ 	MSG_MAP(SetDriverDramAddrLow,           PPSMC_MSG_SetDriverTableDramAddrLow,	0),
+ 	MSG_MAP(TransferTableSmu2Dram,          PPSMC_MSG_TransferTableSmu2Dram,	0),
+ 	MSG_MAP(TransferTableDram2Smu,          PPSMC_MSG_TransferTableDram2Smu,	0),
+-	MSG_MAP(GetEnabledSmuFeatures,          PPSMC_MSG_GetEnabledSmuFeatures,	0),
++	MSG_MAP(RequestCorePstate,              PPSMC_MSG_RequestCorePstate,		0),
++	MSG_MAP(QueryCorePstate,                PPSMC_MSG_QueryCorePstate,		0),
+ 	MSG_MAP(RequestGfxclk,                  PPSMC_MSG_RequestGfxclk,		0),
++	MSG_MAP(QueryGfxclk,                    PPSMC_MSG_QueryGfxclk,			0),
++	MSG_MAP(QueryVddcrSocClock,             PPSMC_MSG_QueryVddcrSocClock,		0),
++	MSG_MAP(QueryDfPstate,                  PPSMC_MSG_QueryDfPstate,		0),
++	MSG_MAP(RequestActiveWgp,               PPSMC_MSG_RequestActiveWgp,		0),
++	MSG_MAP(SetMinDeepSleepGfxclkFreq,      PPSMC_MSG_SetMinDeepSleepGfxclkFreq,	0),
++	MSG_MAP(StartTelemetryReporting,        PPSMC_MSG_StartTelemetryReporting,	0),
++	MSG_MAP(StopTelemetryReporting,         PPSMC_MSG_StopTelemetryReporting,	0),
++	MSG_MAP(ClearTelemetryMax,              PPSMC_MSG_ClearTelemetryMax,		0),
++	MSG_MAP(QueryActiveWgp,                 PPSMC_MSG_QueryActiveWgp,		0),
++	MSG_MAP(SetCoreEnableMask,              PPSMC_MSG_SetCoreEnableMask,		0),
++	MSG_MAP(InitiateGcRsmuSoftReset,        PPSMC_MSG_InitiateGcRsmuSoftReset,	0),
++	MSG_MAP(GfxCacWeightOperation,          PPSMC_MSG_GfxCacWeightOperation,	0),
++	MSG_MAP(L3CacWeightOperation,           PPSMC_MSG_L3CacWeightOperation,		0),
++	MSG_MAP(PackCoreCacWeight,              PPSMC_MSG_PackCoreCacWeight,		0),
++	MSG_MAP(SetDriverTableVMID,             PPSMC_MSG_SetDriverTableVMID,		0),
++	MSG_MAP(SetSoftMinCclk,                 PPSMC_MSG_SetSoftMinCclk,		0),
++	MSG_MAP(SetSoftMaxCclk,                 PPSMC_MSG_SetSoftMaxCclk,		0),
++	MSG_MAP(GetGfxFrequency,                PPSMC_MSG_GetGfxFrequency,		0),
++	MSG_MAP(GetGfxVid,                      PPSMC_MSG_GetGfxVid,			0),
++	MSG_MAP(ForceGfxFreq,                   PPSMC_MSG_ForceGfxFreq,			0),
++	MSG_MAP(UnForceGfxFreq,                 PPSMC_MSG_UnForceGfxFreq,		0),
+ 	MSG_MAP(ForceGfxVid,                    PPSMC_MSG_ForceGfxVid,			0),
+ 	MSG_MAP(UnforceGfxVid,                  PPSMC_MSG_UnforceGfxVid,		0),
++	MSG_MAP(GetEnabledSmuFeatures,          PPSMC_MSG_GetEnabledSmuFeatures,	0),
+ };
+ 
+ static struct cmn2asic_mapping cyan_skillfish_table_map[SMU_TABLE_COUNT] = {
