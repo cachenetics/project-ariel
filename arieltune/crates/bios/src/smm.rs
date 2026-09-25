@@ -188,7 +188,7 @@ const END: u8 = 0x24;
 // _IOWR('F', 1, struct smiflash_op) — the op struct is __packed = 270 bytes:
 //   B(cmd) I(offset) I(size) B(status) I(dlen) 256s(data)
 // dir=3<<30 | size(270)<<16 | 'F'(0x46)<<8 | nr(1)
-const SMIFLASH_DO: libc::c_ulong = (3 << 30) | (270 << 16) | ((b'F' as libc::c_ulong) << 8) | 1;
+const SMIFLASH_DO: u64 = (3 << 30) | (270 << 16) | ((b'F' as u64) << 8) | 1;
 
 #[repr(C, packed)]
 struct Op {
@@ -244,7 +244,13 @@ impl Smm {
 
     /// Fire one SMI. Returns (status, returned 256-byte data buffer).
     fn ioctl(&self, mut op: Op) -> io::Result<(u8, [u8; MAXDATA])> {
-        let rc = unsafe { libc::ioctl(self.file.as_raw_fd(), SMIFLASH_DO as i32, &mut op as *mut Op) };
+        let rc = unsafe {
+            libc::ioctl(
+                self.file.as_raw_fd(),
+                SMIFLASH_DO as libc::Ioctl,
+                &mut op as *mut Op,
+            )
+        };
         if rc < 0 {
             return Err(io::Error::last_os_error());
         }
