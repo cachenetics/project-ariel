@@ -200,6 +200,11 @@ fn install_enable(unit: &str, body: &str) -> Result<()> {
 		InitSystem::Systemd => (format!("{UNIT_DIR}/{unit}"), unit.to_string()),
 	};
 	std::fs::write(&path, body).with_context(|| format!("write {path} (need root)"))?;
+	// OpenRC requires init scripts to be executable (rc-update add refuses otherwise)
+	#[cfg(unix)]
+	let perm = std::os::unix::fs::PermissionsExt::from_mode(if isys.is_openrc() { 0o755 } else { 0o644 });
+	#[cfg(unix)]
+	std::fs::set_permissions(&path, perm)?;
 	// OpenRC doesn't need daemon-reload; systemd does
 	if isys.is_systemd() {
 		init_op("daemon-reload", "")?;
