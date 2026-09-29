@@ -2,9 +2,7 @@ belicose:~/project-ariel$ doas ./install.sh
 doas (infinitevalence@belicose.endlessdelve.com) password:
 Detected distro: alpine
 building release binary...
-Compiling bc250-catalog v0.1.0 (/home/infinitevalence/project-ariel/arieltune/crates/bc250-catalog)
 Compiling apu v0.1.0 (/home/infinitevalence/project-ariel/arieltune/crates/apu)
-Compiling wiki v0.1.0 (/home/infinitevalence/project-ariel/arieltune/crates/wiki)
 error[E0599]: the method `to_string` exists for enum `std::option::Option<&str>`, but its trait bounds were not satisfied
 --> crates/apu/src/persist.rs:222:4
 	|
@@ -27,6 +25,7 @@ help: consider using `Option::expect` to unwrap the `&str` value, panicking if t
 	|
 221 |         .map(|l| &l[10..]).expect("REASON")
 	|                           +++++++++++++++++
+
 error[E0308]: mismatched types
 --> crates/apu/src/persist.rs:240:16
 	|
@@ -36,6 +35,7 @@ error[E0308]: mismatched types
 242 | |             bin
 243 | |         ));
 	| |_________^ expected `&str`, found `String`
+
 error[E0308]: mismatched types
 --> crates/apu/src/persist.rs:245:16
 	|
