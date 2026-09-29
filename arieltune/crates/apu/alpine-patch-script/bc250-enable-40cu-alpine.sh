@@ -51,6 +51,9 @@ check_deps() {
 	command -v make >/dev/null 2>&1 || pkgs_to_install="${pkgs_to_install} make"
 	command -v python3 >/dev/null 2>&1 || pkgs_to_install="${pkgs_to_install} python3"
 	command -v vulkaninfo >/dev/null 2>&1 || pkgs_to_install="${pkgs_to_install} vulkan-tools"
+	for _pkg in linux-firmware-amdgpu mesa mesa-gl mesa-dri-gallium mesa-vulkan-ati vulkan-loader; do
+		apk info -q "$_pkg" >/dev/null 2>&1 || pkgs_to_install="${pkgs_to_install} $_pkg"
+	done
 	command -v curl >/dev/null 2>&1 || pkgs_to_install="${pkgs_to_install} curl"
 
 	if ! diff --version 2>/dev/null | grep -q GNU; then
