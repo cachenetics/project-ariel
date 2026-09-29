@@ -66,14 +66,20 @@ detect_pkgmgr() {
 # ── Install kernel headers / kbuild tree ─────────────────────────────────────
 install_headers() {
 		local kver_base="${1:-}"
-		# Alpine: linux-headers (kernel versioned) + build tools
+		# Alpine: linux-headers (flavor-based, not versioned) + build tools
 		if [ "$OS_NAME" = "alpine" ]; then
+			local KVER="$(uname -r)"
+			local flavor="mainline"
+			case "$KVER" in
+				*-lts*) flavor="lts" ;;
+				*-zen*) flavor="zen" ;;
+			esac
 			apk add --no-cache \
-				"linux-headers-${kver_base}" \
 				"build" \
 				"gcc" \
 				"make" \
-				"bash" 2>/dev/null || true
+				"linux-${flavor}-headers" \
+				"linux-headers" 2>/dev/null || true
 		# Debian/Ubuntu
 		elif [ "$OS_NAME" = "debian" ]; then
 			apt install -y -q \
