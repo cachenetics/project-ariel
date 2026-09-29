@@ -155,7 +155,7 @@ do_build() {
 		KBUILD="$KBUILD_TREE"
 		SRC="${2:-/tmp/nct6687d}"
 		[ -d "$SRC/.git" ] || git clone "$UPSTREAM" "$SRC"
-		git -C "$SRC" checkout "$UPSTREAM_COMMIT"
+		git -C "$SRC" checkout "$UPSTREAM_COMMIT" -- nct6687.c
 		git -C "$SRC" apply "$HERE/0001-nct6687-bc250-ec-firmware-attach.patch"
 		git -C "$SRC" apply "$HERE/0002-nct6687-silence-secondary-port-open-bus.patch"
 
