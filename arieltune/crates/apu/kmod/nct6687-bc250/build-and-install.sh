@@ -142,7 +142,7 @@ resolve_kbuild_tree() {
 			echo "  /usr/src/linux-$(uname -r)" >&2
 			echo "  /usr/src/linux" >&2
 			echo "Install kernel headers for your distro or pass the path:" >&2
-			echo "  $0 build /path/to/kbuild-tree" >&2
+			echo "  $0 build /path/to/kbuild-tree  (or let it auto-detect)" >&2
 			exit 1
 		fi
 }
@@ -206,12 +206,16 @@ all)
 		SRC="${3:-/tmp/nct6687d}"
 		do_build "${2:-}" "${3:-}"
 		# install phase
-		do_install "$SRC"
+		do_install "$SRC/nct6687.ko"
 		;;
 install)
 	do_install "${2:-}"
 	;;
 *)
-	echo "usage: $0 build [kbuild-tree] [upstream-src] | all [kbuild-tree] [upstream-src] | install <nct6687.ko>"; exit 1
+	echo "usage: $0 [build | all | install] [args...]" >&2
+	echo "  build  [kbuild-tree] [src-dir]    Build kernel module (auto-detects if omitted)" >&2
+	echo "  all    [kbuild-tree] [src-dir]    Build + install in one step" >&2
+	echo "  install <nct6687.ko>             Install a prebuilt .ko module" >&2
+	exit 1
 	;;
 esac
