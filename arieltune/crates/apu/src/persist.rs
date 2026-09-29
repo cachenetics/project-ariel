@@ -49,16 +49,7 @@ impl InitSystem {
 		DETECTOR.get().copied().unwrap_or(InitSystem::Systemd)
 	}
 
-	/// Return true when this backend is systemd.
-	pub fn is_systemd(self) -> bool {
-		self == Self::Systemd
-	}
 
-	/// Return true when this backend is OpenRC.
-	#[allow(dead_code)]
-	pub fn is_openrc(self) -> bool {
-		self == Self::OpenRc
-	}
 }
 
 static DETECTOR: OnceLock<InitSystem> = OnceLock::new();
