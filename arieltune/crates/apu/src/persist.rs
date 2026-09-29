@@ -63,6 +63,14 @@ impl InitSystem {
 
 static DETECTOR: OnceLock<InitSystem> = OnceLock::new();
 
+/// Strip the '.service' suffix that systemd units use but OpenRC
+/// init scripts don't â€” rc-update add 'foo.service' looks for
+/// /etc/init.d/foo.service which doesn't exist. rc-update wants just 'foo'.
+#[allow(dead_code)]
+fn strip_rc_unit(name: &str) -> &str {
+	name.strip_suffix(".service").unwrap_or(name)
+}
+
 fn detect_inner() -> InitSystem {
 	if Path::new("/run/systemd/system").exists() {
 		InitSystem::Systemd
@@ -133,27 +141,30 @@ fn init_op(action: &str, unit: &str) -> Result<()> {
 			}
 			_ => systemctl(&[action, unit]),
 		},
-		InitSystem::OpenRc => match action {
-			"daemon-reload" => {
-				// OpenRC has no daemon-reload concept; it's a no-op
-				Ok(())
+		InitSystem::OpenRc => {
+			let rc = strip_rc_unit(unit);
+			match action {
+				"daemon-reload" => {
+					// OpenRC has no daemon-reload concept; it's a no-op
+					Ok(())
+				}
+				"enable" => rc_update(&["add", rc, "default"]),
+				"disable" => rc_update(&["del", rc, "default"]),
+				"start" => rc_service(&[rc, "start"]),
+				"stop" => rc_service(&[rc, "stop"]),
+				"restart" => rc_service(&[rc, "restart"]),
+				"is-enabled" => {
+					// OpenRC: check /etc/runlevel/
+					let _ = unit; // Handled by dedicated `enabled()` below
+					Ok(())
+				}
+				"is-active" => {
+					// OpenRC: rc-service status returns 0 if running
+					let _ = unit; // Handled by dedicated `gpu_unit_active()` below
+					Ok(())
+				}
+				_ => rc_service(&[rc, action]),
 			}
-			"enable" => rc_update(&["add", unit, "default"]),
-			"disable" => rc_update(&["del", unit, "default"]),
-			"start" => rc_service(&[unit, "start"]),
-			"stop" => rc_service(&[unit, "stop"]),
-			"restart" => rc_service(&[unit, "restart"]),
-			"is-enabled" => {
-				// OpenRC: check /etc/runlevel/
-				let _ = unit; // Handled by dedicated `enabled()` below
-				Ok(())
-			}
-			"is-active" => {
-				// OpenRC: rc-service status returns 0 if running
-				let _ = unit; // Handled by dedicated `gpu_unit_active()` below
-				Ok(())
-			}
-			_ => rc_service(&[unit, action]),
 		},
 	}
 }
@@ -180,16 +191,20 @@ pub fn log_transition(action: &str) {
 /// Install (write + daemon-reload + enable) a boot unit. Idempotent.
 fn install_enable(unit: &str, body: &str) -> Result<()> {
 	let isys = InitSystem::detect();
-	let path = match isys {
-		InitSystem::Systemd => format!("{UNIT_DIR}/{unit}"),
-		InitSystem::OpenRc => format!("/etc/init.d/{unit}"),
+	let (path, rc_unit) = match isys {
+		InitSystem::OpenRc => {
+			// rc-update add requires init script name (no .service suffix)
+			let rc = unit.strip_suffix(".service").unwrap_or(unit);
+			(format!("/etc/init.d/{rc}"), rc.to_string())
+		}
+		InitSystem::Systemd => (format!("{UNIT_DIR}/{unit}"), unit.to_string()),
 	};
 	std::fs::write(&path, body).with_context(|| format!("write {path} (need root)"))?;
 	// OpenRC doesn't need daemon-reload; systemd does
 	if isys.is_systemd() {
 		init_op("daemon-reload", "")?;
 	}
-	init_op("enable", unit)?;
+	init_op("enable", &rc_unit)?;
 	Ok(())
 }
 
@@ -199,7 +214,10 @@ fn disable_remove(unit: &str) {
 	let _ = init_op("disable", unit);
 	let path = match isys {
 		InitSystem::Systemd => format!("{UNIT_DIR}/{unit}"),
-		InitSystem::OpenRc => format!("/etc/init.d/{unit}"),
+		InitSystem::OpenRc => {
+			let rc = strip_rc_unit(unit);
+			format!("/etc/init.d/{rc}")
+		}
 	};
 	let _ = std::fs::remove_file(path);
 	let _ = init_op("daemon-reload", "");
@@ -216,7 +234,8 @@ fn enabled(unit: &str) -> bool {
 				.unwrap_or(false)
 		}
 		InitSystem::OpenRc => {
-			Path::new(&format!("/etc/runlevel/{unit}")).exists()
+			let rc = strip_rc_unit(unit);
+			Path::new(&format!("/etc/runlevel/{rc}")).exists()
 		}
 	}
 }
@@ -374,7 +393,10 @@ fn remove_legacy_units() {
 		let _ = init_op("disable", u);
 		let path = match isys {
 			InitSystem::Systemd => format!("{UNIT_DIR}/{u}"),
-			InitSystem::OpenRc => format!("/etc/init.d/{u}"),
+			InitSystem::OpenRc => {
+				let rc = strip_rc_unit(u);
+				format!("/etc/init.d/{rc}")
+			},
 		};
 		let _ = std::fs::remove_file(path);
 	}
@@ -445,7 +467,10 @@ pub fn gpu_unit_installed() -> bool {
 	let isys = InitSystem::detect();
 	let path = match isys {
 		InitSystem::Systemd => format!("{UNIT_DIR}/{GPU_UNIT}"),
-		InitSystem::OpenRc => format!("/etc/init.d/{GPU_UNIT}"),
+		InitSystem::OpenRc => {
+			let rc = strip_rc_unit(GPU_UNIT);
+			format!("/etc/init.d/{rc}")
+		}
 	};
 	Path::new(&path).exists()
 }
@@ -470,8 +495,9 @@ pub fn gpu_unit_active() -> bool {
 				.unwrap_or(false)
 		}
 		InitSystem::OpenRc => {
+			let rc = strip_rc_unit(GPU_UNIT);
 			Command::new("rc-service")
-				.args([GPU_UNIT, "status", "-q"])
+				.args([rc, "status", "-q"])
 				.stdout(Stdio::null())
 				.stderr(Stdio::null())
 				.status()
