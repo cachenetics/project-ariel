@@ -11,14 +11,17 @@
 # Supported distros: CachyOS, Alpine, Debian/Ubuntu, Arch, Fedora.
 #
 # Usage:
-#  On the board:  ./build-and-install.sh install <path-to-nct6687.ko>
 #  On a v4 host:  ./build-and-install.sh build [kernel-build-tree] [upstream-nct6687d-src]
+#  On the board:  ./build-and-install.sh install
 #  Combined mode: ./build-and-install.sh all [kbuild-tree] [upstream-src]
 #  Both args auto-detect when omitted; pass nothing for defaults.
 set -eu
 UPSTREAM=https://github.com/Fred78290/nct6687d.git
 UPSTREAM_COMMIT=cd735225a95e04dda3e2befd94ba77e1f7609dcc
 HERE=$(cd "$(dirname "$0")" && pwd)
+
+# Known build output directory — build and install always touch this path
+BUILD_OUT="$HERE/build-output"
 
 # ── OS detection ─────────────────────────────────────────────────────────────
 detect_os() {
@@ -31,11 +34,11 @@ detect_os() {
 			OS_ID=alpine
 		fi
 		case "$OS_ID" in
-			alpine)  OS_NAME=alpine  ;;
+			alpine)  OS_NAME=alpine ;;
 			cachyos) OS_NAME=cachyos ;;
 			ubuntu|debian) OS_NAME=debian ;;
-			fedora)  OS_NAME=fedora  ;;
-			arch)    OS_NAME=arch    ;;
+			fedora)  OS_NAME=fedora ;;
+			arch)    OS_NAME=arch ;;
 			*)       OS_NAME="$OS_ID" ;;
 		esac
 		if [ -z "${OS_NAME:-}" ]; then OS_NAME=generic; fi
@@ -147,7 +150,7 @@ resolve_kbuild_tree() {
 		fi
 }
 
-# ── Shared build logic ──────────────────────────────────────────────────────
+# ── Shared build logic: builds .ko into BUILD_OUTPUT ─────────────────────────
 do_build() {
 		KBUILD="$KBUILD_TREE"
 		SRC="${2:-/tmp/nct6687d}"
@@ -170,12 +173,20 @@ do_build() {
 		local LLVM_ARG=
 		[ -e "$KBUILD/include/config/CC_IS_CLANG" ] && LLVM_ARG="LLVM=1"
 		make -C "$KBUILD" M="$SRC" $LLVM_ARG modules
-		echo "built: $SRC/nct6687.ko"
+
+		# Copy the freshly-built .ko into the known build output dir
+		mkdir -p "$BUILD_OUT"
+		cp "$SRC/nct6687.ko" "$BUILD_OUT/nct6687.ko"
+		echo "built → $BUILD_OUT/nct6687.ko"
 }
 
-# ── Shared install logic ────────────────────────────────────────────────────
+# ── Shared install logic: installs .ko from BUILD_OUTPUT ─────────────────────
 do_install() {
-		local KO="${1:?path to prebuilt nct6687.ko}"
+		local KO="${BUILD_OUT}/nct6687.ko"
+		if [ ! -f "$KO" ]; then
+			echo "Error: $KO not found — run 'build' first." >&2
+			exit 1
+		fi
 		local K=$(uname -r)
 		"$SUDO_CMD" install -Dm644 "$KO" "/lib/modules/$K/updates/nct6687.ko"
 		"$SUDO_CMD" depmod -a
@@ -203,19 +214,17 @@ build)
 		;;
 all)
 		resolve_kbuild_tree "${2:-}"
-		SRC="${3:-/tmp/nct6687d}"
 		do_build "${2:-}" "${3:-}"
-		# install phase
-		do_install "$SRC/nct6687.ko"
+		do_install
 		;;
 install)
-	do_install "${2:-}"
-	;;
+		do_install
+		;;
 *)
-	echo "usage: $0 [build | all | install] [args...]" >&2
-	echo "  build  [kbuild-tree] [src-dir]    Build kernel module (auto-detects if omitted)" >&2
-	echo "  all    [kbuild-tree] [src-dir]    Build + install in one step" >&2
-	echo "  install <nct6687.ko>             Install a prebuilt .ko module" >&2
+	echo "usage: $0 [build | all | install]" >&2
+	echo "  build  [kbuild-tree] [src-dir]  Build kernel module (auto-detects if omitted)" >&2
+	echo "  all  [kbuild-tree] [src-dir]  Build + install in one step" >&2
+	echo "  install  Install the .ko from build-output/" >&2
 	exit 1
 	;;
 esac
