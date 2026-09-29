@@ -43,6 +43,13 @@ const VERIFY_SSH_TIMEOUT_S: u64 = 10;
 /// Where the running aputune binary is staged on the target (same arch as the
 /// build host — this is exactly how the binary is already deployed).
 const VERIFY_REMOTE_BIN: &str = "/tmp/aputune-verify";
+/// Appended to every "no PKGBUILD dir" error so the fix is in the error, not
+/// just the README — a fresh CachyOS install has no pinned kernel source yet.
+const NO_PKGBUILD_HINT: &str = "get one with:\n  \
+    git clone https://github.com/CachyOS/linux-cachyos.git ~/linux-cachyos\n  \
+    git -C ~/linux-cachyos checkout 791fb8ea6d3cf7c85e596678c25c56fa140591be   # 7.0.9-1\n  \
+    aputune build --pkgbuild ~/linux-cachyos/linux-cachyos-bore --run\n\
+    (README: \"Liberation quick start\", step 2)";
 
 pub struct BuildOpts {
     /// Directory holding the CachyOS PKGBUILD (+ source tarball, or makepkg
@@ -56,6 +63,9 @@ pub struct BuildOpts {
     pub target: Option<String>,
     /// Value armed in the modprobe.d drop-in (`bc250_cc_write_mode`):
     /// 3 = route all 40 CUs, 0 = patched kernel only (tuning without routing).
+    /// Defaults to 0 (opt-in): a fresh build installs the patched kernel with
+    /// CU routing OFF so the hardware can be validated first; arm 40-CU later
+    /// with `arieltune apu cu enable`.
     pub cc_mode: u32,
     /// Actually execute (default: preview only).
     pub run: bool,
@@ -74,7 +84,7 @@ impl Default for BuildOpts {
             work_dir: work,
             cc: std::env::var("APUTUNE_CC").unwrap_or_else(|_| "gcc-15".into()),
             target: None,
-            cc_mode: 3,
+            cc_mode: 0,
             run: false,
         }
     }
@@ -622,7 +632,7 @@ fn post_extract_plan(
     let pkgbuild = opts
         .pkgbuild_dir
         .clone()
-        .context("no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD)")?;
+        .with_context(|| format!("no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD); {NO_PKGBUILD_HINT}"))?;
     let mut steps = Vec::new();
 
     // 1. apply each embedded patch into the extracted tree. Plain argv — no
@@ -707,7 +717,7 @@ fn post_extract_plan(
     steps.push(Step {
         desc: format!(
             "install package + arm cc_write_mode={mode}{} + SDMA(navi12+trap, fw-gated) + initramfs{}",
-            if mode == 3 { " (40-CU)" } else { "" },
+            if mode == 3 { " (40-CU)" } else { " (CU routing off)" },
             opts.target
                 .as_ref()
                 .map(|t| format!(" + reboot ({t})"))
@@ -731,10 +741,12 @@ pub fn build(opts: BuildOpts) -> Result<()> {
     if let Some(tgt) = &opts.target {
         valid_target(tgt)?;
     }
-    let pkgbuild = opts.pkgbuild_dir.clone().context(
-        "no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD); \
-             it must hold a CachyOS linux-cachyos-* PKGBUILD",
-    )?;
+    let pkgbuild = opts.pkgbuild_dir.clone().with_context(|| {
+        format!(
+            "no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD); \
+             it must hold a CachyOS linux-cachyos-* PKGBUILD\n{NO_PKGBUILD_HINT}"
+        )
+    })?;
     if !pkgbuild.join("PKGBUILD").exists() {
         bail!("no PKGBUILD in {}", pkgbuild.display());
     }
@@ -839,6 +851,13 @@ pub fn build(opts: BuildOpts) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_build_does_not_arm_40cu() {
+        // Issue #27: 40-CU routing is opt-in. A default build must NOT arm it;
+        // callers set cc_mode=3 explicitly (`build --full` / liberate `full`).
+        assert_eq!(BuildOpts::default().cc_mode, 0);
+    }
 
     #[test]
     fn target_validation() {

@@ -4128,6 +4128,10 @@ CVE-2025-48515  MEDIUM    UNPATCHED  2025 fix               PSP BL — SPIROM in
                                                             overflow
 CVE-2021-26344  HIGH      Disputed   ComboAM4v2PI 1.2.0.8+  ABL3 APCB parser overflow —
                                                             classic primitive not found
+CVE-2025-52533  HIGH 8.7  UNPATCHED  AMD-SB-4013/3023       On-chip debug interface -
+                                     Feb26                  improper access control lets
+                                                            a privileged attacker enable
+                                                            it (CWE-1191)
 
   Tier 2 — stepping stones (x86 SMM, not direct PSP):
 
@@ -4135,6 +4139,9 @@ CVE             Sev  Component           Status
 ──────────────  ───  ──────────────────  ───────────────────────────────────────────────
 CVE-2024-36311  MED  SMM TOCTOU race     Support-path only
 CVE-2025-29950  MED  SMM stack overflow  Support-path only
+CVE-2025-54502  HIGH SMM callout (APCB   Support-path only - Ring 0 -> SMM privilege
+                     driver boot-svc)    escalation via APCB SMM driver's LocateProtocol
+                                         misuse (AMD-SB-7054 Apr26)
 
   Relevant external research (references, not procedures):
 
