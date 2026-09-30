@@ -1,0 +1,89 @@
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c
+@@ -921,6 +921,8 @@
+ static void cyan_skillfish_create_cclk_debugfs(struct amdgpu_device *adev,
+ 					        struct dentry *root);
+ 
++static const struct file_operations cyan_telemetry_fops;
++
+ void cyan_skillfish_create_cac_debugfs(struct amdgpu_device *adev)
+ {
+ 	struct dentry *root;
+@@ -948,6 +950,9 @@
+ 			    root, &cyan_l3_cac_ctx, &cyan_cac_fops);
+ 
+ 	cyan_skillfish_create_cclk_debugfs(adev, root);
++
++	debugfs_create_file("cyan_skillfish_telemetry", S_IRUSR,
++			    root, adev, &cyan_telemetry_fops);
+ }
+ 
+ /*
+@@ -1049,6 +1054,67 @@
+ 			    root, &cyan_cclk_max_ctx, &cyan_cclk_fops);
+ }
+ 
++/*
++ * Comprehensive chip telemetry — single debugfs read fan-outs over the
++ * Query* msgids wired by the msg_map expansion (MR !11). Useful as a
++ * "what state is the chip in right now" snapshot for diagnostics.
++ *
++ * Each read triggers fresh Q0 mailbox sends; values are serialized via
++ * smu->msg_ctl.lock so they're race-free even during compute. Read-only,
++ * root-only.
++ */
++static ssize_t cyan_telemetry_read(struct file *f, char __user *ubuf,
++				    size_t count, loff_t *pos)
++{
++	struct amdgpu_device *adev = f->f_inode->i_private;
++	struct smu_context *smu;
++	char buf[1024];
++	int n = 0;
++	u32 val;
++
++	if (!adev || !adev->powerplay.pp_handle)
++		return -ENODEV;
++	smu = adev->powerplay.pp_handle;
++
++	n += scnprintf(buf + n, sizeof(buf) - n, "=== BC-250 chip telemetry ===\n");
++
++	if (!smu_cmn_send_smc_msg(smu, SMU_MSG_QueryGfxclk, &val))
++		n += scnprintf(buf + n, sizeof(buf) - n, "GfxClk:          %u MHz\n", val);
++
++	if (!smu_cmn_send_smc_msg(smu, SMU_MSG_GetGfxVid, &val))
++		n += scnprintf(buf + n, sizeof(buf) - n, "GetGfxVid:       0x%x  (PMFW returns major=0x58=88 at idle)\n", val);
++
++	if (!smu_cmn_send_smc_msg(smu, SMU_MSG_QueryVddcrSocClock, &val))
++		n += scnprintf(buf + n, sizeof(buf) - n, "QueryVddcrSocClock: %u\n", val);
++
++	if (!smu_cmn_send_smc_msg(smu, SMU_MSG_QueryDfPstate, &val))
++		n += scnprintf(buf + n, sizeof(buf) - n, "DfPstate:        %u\n", val);
++
++	if (!smu_cmn_send_smc_msg(smu, SMU_MSG_QueryActiveWgp, &val))
++		n += scnprintf(buf + n, sizeof(buf) - n, "QueryActiveWgp:  0x%x  (PMFW reports 0 even with 40-CU enabled — write-only msgid)\n", val);
++
++	if (!smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_QueryCorePstate, 0, &val))
++		n += scnprintf(buf + n, sizeof(buf) - n, "QueryCorePstate(core 0): 0x%x\n", val);
++
++	if (!smu_cmn_send_smc_msg(smu, SMU_MSG_GetEnabledSmuFeatures, &val))
++		n += scnprintf(buf + n, sizeof(buf) - n, "EnabledSmuFeatures: 0x%08x  (17/32 bits enabled on stock — 0xDD602C7D baseline)\n", val);
++
++	if (!smu_cmn_send_smc_msg(smu, SMU_MSG_GetSmuVersion, &val))
++		n += scnprintf(buf + n, sizeof(buf) - n, "SmuVersion:      0x%x  (PMFW %u.%u.%u)\n",
++			       val, (val >> 16) & 0xff, (val >> 8) & 0xff, val & 0xff);
++
++	if (!smu_cmn_send_smc_msg(smu, SMU_MSG_GetDriverIfVersion, &val))
++		n += scnprintf(buf + n, sizeof(buf) - n, "DriverIfVersion: %u\n", val);
++
++	return simple_read_from_buffer(ubuf, count, pos, buf, n);
++}
++
++static const struct file_operations cyan_telemetry_fops = {
++	.owner = THIS_MODULE,
++	.read = cyan_telemetry_read,
++	.llseek = default_llseek,
++};
++
+ #else  /* !CONFIG_DEBUG_FS */
+ void cyan_skillfish_create_cac_debugfs(struct amdgpu_device *adev) { (void)adev; }
+ #endif

@@ -1,0 +1,42 @@
+From: Gabriel Duarte Guerra <72227489+GabriWar@users.noreply.github.com>
+Subject: [PATCH] drm/amdgpu: guard against NULL entries in ttm->pages during
+ unpopulate
+
+amdgpu_ttm_tt_unpopulate() walks ttm->pages[] and writes pages[i]->mapping
+without checking for NULL. If a GPU command fails partway through, the buffer
+object can be left partially populated and cleanup dereferences a NULL page:
+
+  RIP: 0010:amdgpu_ttm_tt_unpopulate+0x77/0xd0 [amdgpu]
+  CR2: 0000000000000018
+  RAX: 0000000000000000  RBX: ffff8c72d0b6e180  RCX: 0000000000000000
+  Kernel panic - not syncing: Fatal exception
+
+CR2 = 0x18 is the offset of struct page::mapping, confirming pages[i] was NULL.
+
+This matters on the BC-250 because GPU command failures on gfx1013 are routine
+while the compute defect is unresolved, and every one of them risked taking the
+whole blade down. With the guard the failing process dies but the machine
+survives. It is containment, not a fix for the abort itself.
+
+Hunk regenerated 2026-08-17 against linux-cachyos-bore-7.0.9 (7.0.9-1 tarball)
+and byte-verified against the deployed build2 tree on blade 15 (a fleet blade,
+snapshot snap-8fe794e8).
+
+Signed-off-by: Gabriel Duarte Guerra <72227489+GabriWar@users.noreply.github.com>
+---
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
+@@ -1255,8 +1255,11 @@ static void amdgpu_ttm_tt_unpopulate(struct ttm_device *bdev,
+ 	if (ttm->page_flags & TTM_TT_FLAG_EXTERNAL)
+ 		return;
+ 
+-	for (i = 0; i < ttm->num_pages; ++i)
+-		ttm->pages[i]->mapping = NULL;
++	for (i = 0; i < ttm->num_pages; ++i) {
++		struct page *p = ttm->pages[i];
++		if (p)
++			p->mapping = NULL;
++	}
+ 
+ 	adev = amdgpu_ttm_adev(bdev);
+ 

@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BC-250 Liberation Project <bc250@invalid>
+Date: Thu, 22 May 2026 00:00:00 +0000
+Subject: [PATCH] drm/amdgpu: BC-250 40-CU liberation (CC + SPI + RLC)
+
+The Sony-binned BC-250 (Cyan Skillfish, PCI 1002:13fe) enables only 24 of
+40 physical CUs by default (RADV/KFD enumerate just 12 via the fuse-set
+CC_GC_SHADER_ARRAY_CONFIG harvest mask).  The *dispatch*
+gate is the per-shader-array SPI_PG_ENABLE_STATIC_WGP_MASK (default
+0x7 = WGP 0..2 = 6 CUs/SA).  RLC_PG_ALWAYS_ON_WGP_MASK is the companion
+power-gate override.
+
+Clearing only CC is a no-op (RADV enumerates 40 but SPI ignores the
+extra dispatches).  Setting only SPI is a no-op (RADV doesn't generate
+work for unenumerated CUs).  All three together: the silicon dispatches
+waves to all 40 CUs.
+
+Behaviour is gated on PCI device 0x13FE and a new module parameter
+amdgpu.bc250_cc_write_mode so the patch is a no-op on every other ASIC.
+
+Modes:
+  0  off (default)
+  1  probe SE0/SH0 only (dry-run: read CC, write 0, read back, restore)
+  2  clear SE0/SH0 CC only (no SPI/RLC — partial)
+  3  full 40-CU liberation (CC clear all SAs + SPI=0x1F per SH +
+     RLC_PG_ALWAYS_ON_WGP_MASK=0x1F once)
+  4  probe every SA
+
+Measured at mode=3, 2230 MHz / 1000 mV:
+  clpeak FP32:  11221 GFLOPS (vs 6632 stock, +69%)
+  clpeak half2: 21428 GFLOPS
+  llama Qwen3.6-35B-A3B-IQ1_M tg128: +35% vs 24-CU stock
+
+Workload-stability scope: Vulkan paths are stable (RADV).  The AMD
+ROCm OpenCL ICD (/etc/OpenCL/vendors/amdocl64.icd) is NOT safe at 40
+CU on gfx1013 and must remain disabled.
+
+Signed-off-by: BC-250 Liberation Project <bc250@invalid>
+---
+ drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c | 91 ++++++++++++++++++++++++++
+ 1 file changed, 91 insertions(+)
+
+--- a/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+@@ -26,6 +26,17 @@
+ #include <linux/firmware.h>
+ #include <linux/module.h>
+ #include <linux/pci.h>
++
++/* BC-250 (Cyan Skillfish, PCI 1002:13fe) 40-CU re-enablement.
++ * 0=off, 1=probe SE0SH0, 2=clear SE0SH0 CC only,
++ * 3=full liberation (CC clear all SAs + SPI=0x1F per SH + RLC=0x1F broadcast),
++ * 4=probe all SAs.  No-op on any other PCI id.
++ */
++static int bc250_cc_write_mode;
++module_param(bc250_cc_write_mode, int, 0444);
++MODULE_PARM_DESC(bc250_cc_write_mode,
++	"BC-250: 0=off 1=probe-SE0SH0 2=clear-SE0SH0-CC 3=full-40CU-liberation 4=probe-all-SAs");
++
+ #include "amdgpu.h"
+ #include "amdgpu_gfx.h"
+ #include "amdgpu_psp.h"
+@@ -5107,6 +5118,80 @@
+ 					adev->gfx.config.max_sh_per_se;
+ 
+ 	mutex_lock(&adev->grbm_idx_mutex);
++
++	/* BC-250 40-CU liberation.  Runs before the regular RB setup loop so
++	 * the harvest mask is already cleared when amdgpu inventories CUs.
++	 * Skipped entirely on non-BC-250 silicon.
++	 */
++	if (bc250_cc_write_mode > 0 && adev->pdev->device == 0x13FE) {
++		int bc_se, bc_sh;
++		bool bc_probe = (bc250_cc_write_mode == 1 ||
++				 bc250_cc_write_mode == 4);
++		bool bc_full  = (bc250_cc_write_mode == 3);
++
++		for (bc_se = 0; bc_se < adev->gfx.config.max_shader_engines; bc_se++) {
++			for (bc_sh = 0; bc_sh < adev->gfx.config.max_sh_per_se; bc_sh++) {
++				u32 bc_orig, bc_after;
++
++				if ((bc250_cc_write_mode == 1 ||
++				     bc250_cc_write_mode == 2) &&
++				    (bc_se > 0 || bc_sh > 0))
++					continue;
++
++				gfx_v10_0_select_se_sh(adev, bc_se, bc_sh,
++						       0xffffffff, 0);
++				bc_orig = RREG32_SOC15(GC, 0,
++					mmCC_GC_SHADER_ARRAY_CONFIG);
++				WREG32_SOC15(GC, 0,
++					mmCC_GC_SHADER_ARRAY_CONFIG, 0);
++				bc_after = RREG32_SOC15(GC, 0,
++					mmCC_GC_SHADER_ARRAY_CONFIG);
++
++				if (bc_probe) {
++					WREG32_SOC15(GC, 0,
++						mmCC_GC_SHADER_ARRAY_CONFIG,
++						bc_orig);
++					dev_info(adev->dev,
++						"bc250-cc-probe: se=%d sh=%d orig=0x%08x after=0x%08x (restored)\n",
++						bc_se, bc_sh, bc_orig, bc_after);
++					continue;
++				}
++
++				dev_info(adev->dev,
++					"bc250-cc-clear: mode=%d se=%d sh=%d orig=0x%08x after=0x%08x\n",
++					bc250_cc_write_mode, bc_se, bc_sh,
++					bc_orig, bc_after);
++
++				if (bc_full) {
++					u32 spi_orig = RREG32_SOC15(GC, 0,
++						mmSPI_PG_ENABLE_STATIC_WGP_MASK);
++					WREG32_SOC15(GC, 0,
++						mmSPI_PG_ENABLE_STATIC_WGP_MASK,
++						0x1F);
++					dev_info(adev->dev,
++						"bc250-spi-set: se=%d sh=%d orig=0x%08x after=0x%08x\n",
++						bc_se, bc_sh, spi_orig,
++						RREG32_SOC15(GC, 0,
++						 mmSPI_PG_ENABLE_STATIC_WGP_MASK));
++				}
++			}
++		}
++
++		gfx_v10_0_select_se_sh(adev, 0xffffffff, 0xffffffff,
++				       0xffffffff, 0);
++
++		if (bc_full) {
++			u32 rlc_orig = RREG32_SOC15(GC, 0,
++				mmRLC_PG_ALWAYS_ON_WGP_MASK);
++			WREG32_SOC15(GC, 0,
++				mmRLC_PG_ALWAYS_ON_WGP_MASK, 0x1F);
++			dev_info(adev->dev,
++				"bc250-rlc-set: orig=0x%08x after=0x%08x\n",
++				rlc_orig, RREG32_SOC15(GC, 0,
++				 mmRLC_PG_ALWAYS_ON_WGP_MASK));
++		}
++	}
++
+ 	for (i = 0; i < adev->gfx.config.max_shader_engines; i++) {
+ 		for (j = 0; j < adev->gfx.config.max_sh_per_se; j++) {
+ 			bitmap = i * adev->gfx.config.max_sh_per_se + j;
+-- 
+2.45.0

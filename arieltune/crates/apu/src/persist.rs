@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Make TUI/CLI settings survive reboots via systemd oneshots that re-apply the
+//! Make TUI/CLI settings survive reboots via init-system units that re-apply the
 //! saved config at boot. aputune already runs as root (SMU/SMN access), so it
-//! writes the unit files and drives systemctl directly.
+//! writes the unit files and drives the init system directly.
 //!
 //! Each tunable domain persists its own config file and has a boot unit that
 //! re-applies it:
 //!
 //! * CPU OC  -> /var/lib/aputune/cpu.json   (arieltune-cpu-oc.service)
 //! * CU route-> /var/lib/aputune/route.json (arieltune-route.service; also used
-//!   by the existing hand-installed unit)
+//!  by the existing hand-installed unit)
 //!
 //! GPU power (manual pin / governor / autosleep / released) persists via
 //! dpm::PowerConfig + ONE always-enabled unit (arieltune-gpu.service) whose
@@ -18,65 +18,316 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use anyhow::{ensure, Context, Result};
+
+// ---------------------------------------------------------------------------+
+// Init-system detection                                                     |
+// +-------------------------------------------------------------------------+
+//
+// Detects systemd (systemctl) or OpenRC (rc-update / rc-service) at first call
+// and caches the result.  All subsequent operations dispatch to the correct
+// backend.
+//
+// Detection order:
+//  1. /run/systemd/system — presence indicates systemd is running
+//  2. /etc/init.d — presence indicates OpenRC
+//  3. fall back to systemd (most common default)
+//
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitSystem {
+	Systemd,
+	OpenRc,
+}
+
+impl InitSystem {
+	/// Detect the running init system.  Caches result via OnceLock.
+	pub fn detect() -> Self {
+		let _ = DETECTOR.get_or_init(detect_inner);
+		DETECTOR.get().copied().unwrap_or(InitSystem::Systemd)
+	}
+
+
+}
+
+static DETECTOR: OnceLock<InitSystem> = OnceLock::new();
+
+/// Strip the '.service' suffix that systemd units use but OpenRC
+/// init scripts don't — rc-update add 'foo.service' looks for
+/// /etc/init.d/foo.service which doesn't exist. rc-update wants just 'foo'.
+#[allow(dead_code)]
+fn strip_rc_unit(name: &str) -> &str {
+	name.strip_suffix(".service").unwrap_or(name)
+}
+
+fn detect_inner() -> InitSystem {
+	if Path::new("/run/systemd/system").exists() {
+		InitSystem::Systemd
+	} else if Path::new("/etc/runlevel").exists() {
+		// /etc/runlevel is OpenRC-specific; /etc/init.d alone is not a reliable
+		// indicator (systemd hosts sometimes have a legacy init.d directory).
+		InitSystem::OpenRc
+	} else if Path::new("/etc/init.d").exists() {
+		InitSystem::OpenRc
+	} else {
+		InitSystem::Systemd
+	}
+}
 
 const UNIT_DIR: &str = "/etc/systemd/system";
 
 fn systemctl(args: &[&str]) -> Result<()> {
-    // Silence stdout/stderr: systemctl's "Created symlink"/"Removed"/"Failed to
-    // disable" chatter would otherwise splatter onto the ratatui TUI screen.
-    let st = Command::new("systemctl")
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("run systemctl {args:?}"))?;
-    ensure!(st.success(), "systemctl {:?} failed ({st})", args);
-    Ok(())
+	// Silence stdout/stderr: systemctl's "Created symlink"/"Removed"/"Failed to
+	// disable" chatter would otherwise splatter onto the ratatui TUI screen.
+	let st = Command::new("systemctl")
+		.args(args)
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.status()
+		.with_context(|| format!("run systemctl {args:?}"))?;
+	ensure!(st.success(), "systemctl {:?} failed ({st})", args);
+	Ok(())
+}
+
+fn rc_service(args: &[&str]) -> Result<()> {
+	let st = Command::new("rc-service")
+		.args(args)
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.status()
+		.with_context(|| format!("run rc-service {args:?}"))?;
+	// rc-service returns 0 for success, 1 if service not found, 2 for others
+	ensure!(st.success(), "rc-service {:?} failed ({st})", args);
+	Ok(())
+}
+
+fn rc_update(args: &[&str]) -> Result<()> {
+	let st = Command::new("rc-update")
+		.args(args)
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.status()
+		.with_context(|| format!("run rc-update {args:?}"))?;
+	ensure!(st.success(), "rc-update {:?} failed ({st})", args);
+	Ok(())
+}
+
+/// Run the correct init-system command for a unit operation.
+/// Maps both systemd and OpenRC actions transparently.
+fn init_op(action: &str, unit: &str) -> Result<()> {
+	let isys = InitSystem::detect();
+	match isys {
+		InitSystem::Systemd => match action {
+			"daemon-reload" => systemctl(&["daemon-reload"]),
+			"enable" => systemctl(&["enable", unit]),
+			"disable" => systemctl(&["disable", unit]),
+			"start" => systemctl(&["start", unit]),
+			"stop" => systemctl(&["stop", unit]),
+			"restart" => systemctl(&["restart", unit]),
+			"is-enabled" => {
+				// Handled by dedicated `enabled()` below
+				Ok(())
+			}
+			"is-active" => {
+				// Handled by dedicated `gpu_unit_active()` below
+				Ok(())
+			}
+			_ => systemctl(&[action, unit]),
+		},
+		InitSystem::OpenRc => {
+			let rc = strip_rc_unit(unit);
+			match action {
+				"daemon-reload" => {
+					// OpenRC has no daemon-reload concept; it's a no-op
+					Ok(())
+				}
+				"enable" => rc_update(&["add", rc, "default"]),
+				"disable" => rc_update(&["del", rc, "default"]),
+				"start" => rc_service(&[rc, "start"]),
+				"stop" => rc_service(&[rc, "stop"]),
+				"restart" => rc_service(&[rc, "restart"]),
+				"is-enabled" => {
+					// OpenRC: check /etc/runlevel/
+					let _ = unit; // Handled by dedicated `enabled()` below
+					Ok(())
+				}
+				"is-active" => {
+					// OpenRC: rc-service status returns 0 if running
+					let _ = unit; // Handled by dedicated `gpu_unit_active()` below
+					Ok(())
+				}
+				_ => rc_service(&[rc, action]),
+			}
+		},
+	}
 }
 
 /// Append a one-line audit record of a GPU power-mode transition to
-/// /var/lib/aputune/transitions.log. aputune silences all systemctl chatter (so
+/// /var/lib/aputune/transitions.log. aputune silences all init-system chatter (so
 /// it doesn't splatter the TUI), which also means its own mode changes leave no
 /// trace — this restores one. Best-effort; never fails the caller.
 pub fn log_transition(action: &str) {
-    use std::io::Write;
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/var/lib/aputune/transitions.log")
-    {
-        let _ = writeln!(f, "{ts} {action}");
-    }
+	use std::io::Write;
+	let ts = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.map(|d| d.as_secs())
+		.unwrap_or(0);
+	if let Ok(mut f) = std::fs::OpenOptions::new()
+		.create(true)
+		.append(true)
+		.open("/var/lib/aputune/transitions.log")
+	{
+		let _ = writeln!(f, "{ts} {action}");
+	}
 }
 
 /// Install (write + daemon-reload + enable) a boot unit. Idempotent.
 fn install_enable(unit: &str, body: &str) -> Result<()> {
-    let path = format!("{UNIT_DIR}/{unit}");
-    std::fs::write(&path, body).with_context(|| format!("write {path} (need root)"))?;
-    systemctl(&["daemon-reload"])?;
-    systemctl(&["enable", unit])?;
-    Ok(())
+	let isys = InitSystem::detect();
+	match isys {
+		InitSystem::OpenRc => {
+			let rc = strip_rc_unit(unit);
+			let path = format!("/etc/init.d/{rc}");
+			// Body is systemd syntax; generate a proper OpenRC shell script.
+			let script = generate_openrc_script(unit, body);
+			std::fs::write(&path, &script)
+				.with_context(|| format!("write {path} (need root)"))?;
+			let perm = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+			std::fs::set_permissions(&path, perm)?;
+			init_op("enable", rc)?;
+		}
+		InitSystem::Systemd => {
+			let path = format!("{UNIT_DIR}/{unit}");
+			std::fs::write(&path, body)
+				.with_context(|| format!("write {path} (need root)"))?;
+			let perm = std::os::unix::fs::PermissionsExt::from_mode(0o644);
+			std::fs::set_permissions(&path, perm)?;
+			init_op("daemon-reload", "")?;
+			init_op("enable", unit)?;
+		},
+	}
+	Ok(())
+}
+
+/// Generate an OpenRC init script from a systemd unit body.
+/// Wraps all units in start() so OpenRC doesn't execute commands on
+/// status/stop verbs (sourcing the script). GPU unit additionally checks
+/// power.json for force_mhz to choose sync apply-boot vs background daemon.
+fn generate_openrc_script(unit_name: &str, body: &str) -> String {
+	let exec_start = body
+		.lines()
+		.find(|l| l.starts_with("ExecStart="))
+		.map(|l| &l[10..])
+		.unwrap_or("exit 0");
+
+	let mut out = "#!/sbin/openrc-run\n\n".to_string();
+	out.push_str(&format!("# AUTO-GENERATED by arieltune ({unit_name}).\n"));
+	out.push_str("# Translated from systemd unit for OpenRC compatibility\n");
+	out.push_str("# `arieltune apu` manages this — do not edit manually.\n\n");
+
+	let pid_name = unit_name.replace(".service", "");
+	out.push_str(&format!("pidfile=/run/{pid_name}.pid\n\n"));
+
+	// Detect the GPU power unit (Type=simple with gpu apply-boot in ExecStart).
+	// It always runs in start() but branches: if power.json has force_mhz,
+	// run apply-boot synchronously (manual pin branch exits 0); otherwise run
+	// the governor/autosleep daemon in background.
+	let is_gpu_unit = body
+		.lines()
+		.any(|l| l.trim().starts_with("ExecStart=") && l.contains("gpu apply-boot"));
+
+	if is_gpu_unit {
+		out.push_str("start() {\n");
+		out.push_str("\tif grep -q \"force_mhz\" /var/lib/aputune/power.json; then\n");
+		out.push_str(&format!("\t\t{exec_start}\n"));
+		out.push_str("\telse\n");
+		let (bin, args) = if let Some(idx) = exec_start.find(' ') {
+			(&exec_start[..idx], &exec_start[idx + 1..])
+		} else {
+			(exec_start, "")
+		};
+
+		if args.is_empty() {
+			out.push_str(&format!(
+				"\t\tstart-stop-daemon --start --pidfile \"$pidfile\" \\
+\t\t\t--background --exec {}\n",
+				bin
+			));
+		} else {
+			out.push_str(&format!(
+				"\t\tstart-stop-daemon --start --pidfile \"$pidfile\" \\
+\t\t\t--background --exec {} -- {}\n",
+				bin, args
+			));
+		}
+		out.push_str("\tfi\n");
+		out.push_str("}\n");
+	} else {
+		let is_oneshot = body.lines().any(|l| l.trim() == "Type=oneshot");
+
+		out.push_str("start() {\n");
+		if is_oneshot {
+			// Run the command directly; OpenRC waits for exit and reports it.
+			out.push_str(&format!("\t{exec_start}\n"));
+		} else {
+			let (bin, args) = if let Some(idx) = exec_start.find(' ') {
+				(&exec_start[..idx], &exec_start[idx + 1..])
+			} else {
+				(exec_start, "")
+			};
+
+			if args.is_empty() {
+				out.push_str(&format!(
+					"\tstart-stop-daemon --start --pidfile \"$pidfile\" \\
+\t\t--background --exec {}\n",
+					bin
+				));
+			} else {
+				out.push_str(&format!(
+					"\tstart-stop-daemon --start --pidfile \"$pidfile\" \\
+\t\t--background --exec {} -- {}\n",
+					bin, args
+				));
+			}
+		}
+		out.push_str("}\n");
+	}
+
+	out
 }
 
 /// Disable + remove a boot unit. Best-effort (never errors on a missing unit).
 fn disable_remove(unit: &str) {
-    let _ = systemctl(&["disable", unit]);
-    let _ = std::fs::remove_file(format!("{UNIT_DIR}/{unit}"));
-    let _ = systemctl(&["daemon-reload"]);
+	let isys = InitSystem::detect();
+	let _ = init_op("disable", unit);
+	let path = match isys {
+		InitSystem::Systemd => format!("{UNIT_DIR}/{unit}"),
+		InitSystem::OpenRc => {
+			let rc = strip_rc_unit(unit);
+			format!("/etc/init.d/{rc}")
+		}
+	};
+	let _ = std::fs::remove_file(path);
+	let _ = init_op("daemon-reload", "");
 }
 
 fn enabled(unit: &str) -> bool {
-    Command::new("systemctl")
-        .args(["is-enabled", "--quiet", unit])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+	let isys = InitSystem::detect();
+	match isys {
+		InitSystem::Systemd => {
+			Command::new("systemctl")
+				.args(["is-enabled", "--quiet", unit])
+				.status()
+				.map(|s| s.success())
+				.unwrap_or(false)
+		}
+		InitSystem::OpenRc => {
+			let rc = strip_rc_unit(unit);
+			Path::new(&format!("/etc/runlevel/default/{rc}")).exists()
+		}
+	}
 }
 
 // ---- CPU OC ----
@@ -84,36 +335,36 @@ fn enabled(unit: &str) -> bool {
 pub const CPU_OC_UNIT: &str = "arieltune-cpu-oc.service";
 
 fn cpu_oc_unit_text() -> String {
-    "# AUTO-GENERATED by arieltune. Re-applies the persisted CPU OC (cpu.json) at\n\
-     # boot via the SMU queue-3 mailbox. `arieltune apu cpu restore` removes it.\n\
-     [Unit]\n\
-     Description=arieltune CPU OC re-apply (SMU queue 3)\n\
-     After=multi-user.target\n\
-     \n\
-     [Service]\n\
-     Type=oneshot\n\
-     RemainAfterExit=yes\n\
-     # Boot-settle delay (see governor unit) before actuating the SMU.\n\
-     ExecStartPre=/usr/bin/sleep 60\n\
-     ExecStart=/usr/local/bin/arieltune apu cpu apply-saved\n\
-     \n\
-     [Install]\n\
-     WantedBy=multi-user.target\n"
-        .to_string()
+	"# AUTO-GENERATED by arieltune. Re-applies the persisted CPU OC (cpu.json) at\n\
+	# boot via the SMU queue-3 mailbox. `arieltune apu cpu restore` removes it.\n\
+	[Unit]\n\
+	Description=arieltune CPU OC re-apply (SMU queue 3)\n\
+	After=multi-user.target\n\
+	\n\
+	[Service]\n\
+	Type=oneshot\n\
+	RemainAfterExit=yes\n\
+	# Boot-settle delay (see governor unit) before actuating the SMU.\n\
+	ExecStartPre=/usr/bin/sleep 60\n\
+	ExecStart=/usr/local/bin/arieltune apu cpu apply-saved\n\
+	\n\
+	[Install]\n\
+	WantedBy=multi-user.target\n"
+		.to_string()
 }
 
 /// Install + enable the CPU-OC re-apply service so the saved OC survives reboots.
 pub fn enable_cpu_oc() -> Result<()> {
-    install_enable(CPU_OC_UNIT, &cpu_oc_unit_text())
+	install_enable(CPU_OC_UNIT, &cpu_oc_unit_text())
 }
 
 /// Remove the CPU-OC re-apply service.
 pub fn disable_cpu_oc() {
-    disable_remove(CPU_OC_UNIT)
+	disable_remove(CPU_OC_UNIT)
 }
 
 pub fn cpu_oc_enabled() -> bool {
-    enabled(CPU_OC_UNIT)
+	enabled(CPU_OC_UNIT)
 }
 
 // ---- CU routing ----
@@ -121,42 +372,42 @@ pub fn cpu_oc_enabled() -> bool {
 pub const ROUTE_UNIT: &str = "arieltune-route.service";
 
 fn route_unit_text() -> String {
-    "# AUTO-GENERATED by arieltune. Re-applies the saved CU routing (route.json) at\n\
-     # boot. `arieltune apu cu route-all` + removing the unit reverts.\n\
-     [Unit]\n\
-     Description=arieltune CU routing re-apply (umr)\n\
-     After=multi-user.target\n\
-     \n\
-     [Service]\n\
-     Type=oneshot\n\
-     RemainAfterExit=yes\n\
-     # The settle + verify-retry budget (sleep 30 + up to 8 tries x 8s + umr spawns)\n\
-     # can exceed systemd's default 90s start timeout, which would kill the unit mid-\n\
-     # retry and mark it failed before the budget is spent. Give it generous headroom.\n\
-     TimeoutStartSec=300\n\
-     # Short boot-settle before the first try; `route-load --boot` then verifies the\n\
-     # route actually took and retries (the GPU may not be ready in the first seconds\n\
-     # after boot, and the kernel default routing must be overridden). A failure here\n\
-     # is real (the route did not stick) and shows in `journalctl -u arieltune-route`.\n\
-     ExecStartPre=/usr/bin/sleep 30\n\
-     ExecStart=/usr/local/bin/arieltune apu cu route-load --boot\n\
-     \n\
-     [Install]\n\
-     WantedBy=multi-user.target\n"
-        .to_string()
+	"# AUTO-GENERATED by arieltune. Re-applies the saved CU routing (route.json) at\n\
+	# boot. `arieltune apu cu route-all` + removing the unit reverts.\n\
+	[Unit]\n\
+	Description=arieltune CU routing re-apply (umr)\n\
+	After=multi-user.target\n\
+	\n\
+	[Service]\n\
+	Type=oneshot\n\
+	RemainAfterExit=yes\n\
+	# The settle + verify-retry budget (sleep 30 + up to 8 tries x 8s + umr spawns)\n\
+	# can exceed systemd's default 90s start timeout, which would kill the unit mid-\n\
+	# retry and mark it failed before the budget is spent. Give it generous headroom.\n\
+	TimeoutStartSec=300\n\
+	# Short boot-settle before the first try; `route-load --boot` then verifies the\n\
+	# route actually took and retries (the GPU may not be ready in the first seconds\n\
+	# after boot, and the kernel default routing must be overridden). A failure here\n\
+	# is real (the route did not stick) and shows in `journalctl -u arieltune-route`.\n\
+	ExecStartPre=/usr/bin/sleep 30\n\
+	ExecStart=/usr/local/bin/arieltune apu cu route-load --boot\n\
+	\n\
+	[Install]\n\
+	WantedBy=multi-user.target\n"
+		.to_string()
 }
 
 /// Install + enable the CU-routing re-apply service (used after a route-save).
 pub fn enable_route() -> Result<()> {
-    install_enable(ROUTE_UNIT, &route_unit_text())
+	install_enable(ROUTE_UNIT, &route_unit_text())
 }
 
 pub fn disable_route() {
-    disable_remove(ROUTE_UNIT)
+	disable_remove(ROUTE_UNIT)
 }
 
 pub fn route_enabled() -> bool {
-    enabled(ROUTE_UNIT)
+	enabled(ROUTE_UNIT)
 }
 
 // ---- GPU power (ONE always-enabled unit, dispatched on power.json) ----
@@ -174,72 +425,80 @@ pub const GPU_UNIT: &str = "arieltune-gpu.service";
 /// being enabled means a second SMU clock writer could exist, so `apply-boot`
 /// refuses to (re-)force the clock (`any_legacy_gpu_unit_enabled`). This list
 /// spans BOTH eras so a half-migrated box is safe:
-///   * the aputune pre-single-unit per-mode units (the original drift class);
-///   * the OLD aputune single unit `aputune-gpu.service` -- the M5 rename
-///     supersedes it, but if aputune is still installed alongside arieltune its
-///     unit is a live second writer, so it MUST be caught here;
-///   * the arieltune-era per-mode names -- never generated now, but kept in the
-///     guard too so a future revision that splits the unit again can't sneak a
-///     second writer past this check.
+///  * the aputune pre-single-unit per-mode units (the original drift class);
+///  * the OLD aputune single unit `aputune-gpu.service` -- the M5 rename
+///   supersedes it, but if aputune is still installed alongside arieltune its
+///   unit is a live second writer, so it MUST be caught here;
+///  * the arieltune-era per-mode names -- never generated now, but kept in the
+///   guard too so a future revision that splits the unit again can't sneak a
+///   second writer past this check.
 ///
 /// It deliberately does NOT include the current `GPU_UNIT` (`arieltune-gpu`),
 /// which is always enabled -- listing it would make the guard always fire.
 const LEGACY_GPU_UNITS: [&str; 7] = [
-    // aputune pre-single-unit per-mode units
-    "aputune-gpu-clock.service",
-    "aputune-gpu-governor.service",
-    "aputune-autosleep.service",
-    // OLD aputune single unit (superseded by arieltune-gpu.service)
-    "aputune-gpu.service",
-    // arieltune-era per-mode names (never generated now; future-proofing)
-    "arieltune-gpu-clock.service",
-    "arieltune-gpu-governor.service",
-    "arieltune-autosleep.service",
+	// aputune pre-single-unit per-mode units
+	"aputune-gpu-clock.service",
+	"aputune-gpu-governor.service",
+	"aputune-autosleep.service",
+	// OLD aputune single unit (superseded by arieltune-gpu.service)
+	"aputune-gpu.service",
+	// arieltune-era per-mode names (never generated now; future-proofing)
+	"arieltune-gpu-clock.service",
+	"arieltune-gpu-governor.service",
+	"arieltune-autosleep.service",
 ];
 
 fn gpu_unit_text() -> String {
-    "# AUTO-GENERATED by arieltune. THE one GPU power unit: `gpu apply-boot` reads\n\
-     # power.json and enacts the persisted mode (manual pin / governor /\n\
-     # autosleep / released). Mode changes edit power.json + restart this unit —\n\
-     # it is never disabled.\n\
-     [Unit]\n\
-     Description=arieltune GPU power (manual pin or auto governor, per power.json)\n\
-     After=multi-user.target\n\
-     \n\
-     [Service]\n\
-     Type=simple\n\
-     # The manual/released branches exit 0 once applied; RemainAfterExit keeps\n\
-     # the unit active (exited) and Restart=on-failure won't restart an exit-0.\n\
-     RemainAfterExit=yes\n\
-     Restart=on-failure\n\
-     RestartSec=5\n\
-     # With Type=simple the start job completes immediately, so no start\n\
-     # timeout gates the boot-settle wait inside apply-boot. TimeoutStartSec is\n\
-     # kept as belt-and-braces for any future Type change (a finite timeout\n\
-     # flapped the old Type=oneshot units without reaching steady state).\n\
-     TimeoutStartSec=infinity\n\
-     ExecStart=/usr/local/bin/arieltune apu gpu apply-boot\n\
-     \n\
-     [Install]\n\
-     WantedBy=multi-user.target\n"
-        .to_string()
+	"# AUTO-GENERATED by arieltune. THE one GPU power unit: `gpu apply-boot` reads\n\
+	# power.json and enacts the persisted mode (manual pin / governor /\n\
+	# autosleep / released). Mode changes edit power.json + restart this unit —\n\
+	# it is never disabled.\n\
+	[Unit]\n\
+	Description=arieltune GPU power (manual pin or auto governor, per power.json)\n\
+	After=multi-user.target\n\
+	\n\
+	[Service]\n\
+	Type=simple\n\
+	# The manual/released branches exit 0 once applied; RemainAfterExit keeps\n\
+	# the unit active (exited) and Restart=on-failure won't restart an exit-0.\n\
+	RemainAfterExit=yes\n\
+	Restart=on-failure\n\
+	RestartSec=5\n\
+	# With Type=simple the start job completes immediately, so no start\n\
+	# timeout gates the boot-settle wait inside apply-boot. TimeoutStartSec is\n\
+	# kept as belt-and-braces for any future Type change (a finite timeout\n\
+	# flapped the old Type=oneshot units without reaching steady state).\n\
+	TimeoutStartSec=infinity\n\
+	ExecStart=/usr/local/bin/arieltune apu gpu apply-boot\n\
+	\n\
+	[Install]\n\
+	WantedBy=multi-user.target\n"
+		.to_string()
 }
 
 /// Disable + delete the legacy per-mode GPU units (migration). Best-effort.
 fn remove_legacy_units() {
-    for u in LEGACY_GPU_UNITS {
-        let _ = systemctl(&["disable", "--now", u]);
-        let _ = std::fs::remove_file(format!("{UNIT_DIR}/{u}"));
-    }
-    let _ = systemctl(&["daemon-reload"]);
+	let isys = InitSystem::detect();
+	for u in LEGACY_GPU_UNITS {
+		let _ = init_op("disable", u);
+		let path = match isys {
+			InitSystem::Systemd => format!("{UNIT_DIR}/{u}"),
+			InitSystem::OpenRc => {
+				let rc = strip_rc_unit(u);
+				format!("/etc/init.d/{rc}")
+			},
+		};
+		let _ = std::fs::remove_file(path);
+	}
+	let _ = init_op("daemon-reload", "");
 }
 
 /// Install + enable the single GPU power unit, then migrate off the legacy
 /// per-mode units. Idempotent; always rewrites the unit text so fixes propagate.
 pub fn ensure_gpu_unit() -> Result<()> {
-    install_enable(GPU_UNIT, &gpu_unit_text())?;
-    remove_legacy_units();
-    Ok(())
+	install_enable(GPU_UNIT, &gpu_unit_text())?;
+	remove_legacy_units();
+	Ok(())
 }
 
 /// Make the persisted power.json mode authoritative: ensure the single unit is
@@ -247,14 +506,14 @@ pub fn ensure_gpu_unit() -> Result<()> {
 /// governor/autosleep daemon and re-enacts the saved mode). Callers do the live
 /// SMU action first for instant effect; this makes it stick.
 pub fn apply_mode() -> Result<()> {
-    ensure_gpu_unit()?;
-    restart_gpu_unit();
-    Ok(())
+	ensure_gpu_unit()?;
+	restart_gpu_unit();
+	Ok(())
 }
 
 /// Restart the GPU power unit (re-enacts power.json). Best-effort.
 pub fn restart_gpu_unit() {
-    let _ = systemctl(&["restart", GPU_UNIT]);
+	let _ = init_op("restart", GPU_UNIT);
 }
 
 /// Transiently stop GPU power management (e.g. to hard-pin the clock for a
@@ -262,55 +521,78 @@ pub fn restart_gpu_unit() {
 /// resumes the persisted mode. Also stops any legacy unit still running on an
 /// un-migrated host, so a bench never races a second SMU writer (wedge class).
 pub fn stop_gpu_unit() {
-    let _ = systemctl(&["stop", GPU_UNIT]);
-    for u in LEGACY_GPU_UNITS {
-        let _ = systemctl(&["stop", u]);
-    }
+	let _ = init_op("stop", GPU_UNIT);
+	for u in LEGACY_GPU_UNITS {
+		let _ = init_op("stop", u);
+	}
 }
 
 /// Resume GPU power management after `stop_gpu_unit`: start the single unit
 /// (apply-boot re-enacts the persisted mode — a manual pin comes back pinned).
 /// On an un-migrated host, restart whichever legacy units are still enabled.
 pub fn start_gpu_unit() {
-    let _ = systemctl(&["start", GPU_UNIT]);
-    for u in LEGACY_GPU_UNITS {
-        if enabled(u) {
-            let _ = systemctl(&["start", u]);
-        }
-    }
+	let _ = init_op("start", GPU_UNIT);
+	for u in LEGACY_GPU_UNITS {
+		if enabled(u) {
+			let _ = init_op("start", u);
+		}
+	}
 }
 
 /// Restart the GPU unit only in AUTO mode (no manual pin) — used after a
 /// governor tier/config edit so the running daemon rereads it. A manual pin is
 /// left completely undisturbed (heat-safety: never churn a pinned clock).
 pub fn reload_if_auto() {
-    if crate::dpm::PowerConfig::load_or_default()
-        .force_mhz
-        .is_none()
-    {
-        restart_gpu_unit();
-    }
+	if crate::dpm::PowerConfig::load_or_default()
+		.force_mhz
+		.is_none()
+	{
+		restart_gpu_unit();
+	}
 }
 
 /// Is the single GPU power unit installed (its file present)? Used by the
 /// voltage paths to report honestly whether a saved Vid will re-apply at boot.
 pub fn gpu_unit_installed() -> bool {
-    Path::new(&format!("{UNIT_DIR}/{GPU_UNIT}")).exists()
+	let isys = InitSystem::detect();
+	let path = match isys {
+		InitSystem::Systemd => format!("{UNIT_DIR}/{GPU_UNIT}"),
+		InitSystem::OpenRc => {
+			let rc = strip_rc_unit(GPU_UNIT);
+			format!("/etc/init.d/{rc}")
+		}
+	};
+	Path::new(&path).exists()
 }
 
 /// Is ANY legacy GPU unit still enabled (un-migrated host)? This is the guard
 /// apply-boot uses for BOTH the manual and auto branches — a legacy governor OR
 /// autosleep unit is a competing SMU writer either way.
 pub fn any_legacy_gpu_unit_enabled() -> bool {
-    LEGACY_GPU_UNITS.iter().any(|u| enabled(u))
+	LEGACY_GPU_UNITS.iter().any(|u| enabled(u))
 }
 
 /// Is the GPU power unit currently active (running or exited-held)? Used by the
 /// TUI mode row to flag a power.json that CLAIMS governor while nothing runs.
 pub fn gpu_unit_active() -> bool {
-    Command::new("systemctl")
-        .args(["is-active", "--quiet", GPU_UNIT])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+	let isys = InitSystem::detect();
+	match isys {
+		InitSystem::Systemd => {
+			Command::new("systemctl")
+				.args(["is-active", "--quiet", GPU_UNIT])
+				.status()
+				.map(|s| s.success())
+				.unwrap_or(false)
+		}
+		InitSystem::OpenRc => {
+			let rc = strip_rc_unit(GPU_UNIT);
+			Command::new("rc-service")
+				.args([rc, "status", "-q"])
+				.stdout(Stdio::null())
+				.stderr(Stdio::null())
+				.status()
+				.map(|s| s.success())
+				.unwrap_or(false)
+		}
+	}
 }

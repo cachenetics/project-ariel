@@ -615,7 +615,12 @@ fn cmd_cu(action: CuCmd) -> Result<()> {
         CuCmd::Enable => {
             cu::enable_persist()?;
             println!("persisted: {}", cu::MODPROBE_CONF);
-            println!("now run `mkinitcpio -P` (or your initramfs tool) and reboot.");
+            let initramfs_cmd = if std::fs::read_to_string("/etc/alpine-release").is_ok() {
+                "mkimage"
+            } else {
+                "mkinitcpio -P"
+            };
+            println!("now run `{}` and reboot.", initramfs_cmd);
             if !detect::report()
                 .rows
                 .iter()

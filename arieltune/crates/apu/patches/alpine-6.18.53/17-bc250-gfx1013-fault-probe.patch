@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BC-250 Liberation Project <bc250@invalid>
+Date: Wed, 5 Aug 2026 00:00:00 +0000
+Subject: [PATCH] drm/amdgpu: gfx1013 instruction-fetch fault probe
+
+Diagnostic. Report-only -- it changes no control flow and fixes nothing.
+
+The open BC-250 compute defect is that the second heavy GPU phase of a
+multi-phase workload dies on a GPUVM fault. The fault is always an SQC (inst)
+read, i.e. the shader-instruction cache, so the wave's PC was already wrong
+before the fault was raised.
+
+Nine faults collected across separate boots with ASLR active (GabriWar,
+docs/08-address-corruption.md) show seven sharing an identical shape:
+
+  0xffb5506bb000  0xffe8464bb000  0xff14126bb000  0xff550dabb000
+  0xff26f76bb000  0xfffd1e6bb000  0xff64aa2bb000
+
+Top byte 0xff, low 20 bits 0xbb000, only bits [39:20] varying with ASLR. The
+process's own code objects live at 0x7f..., and 0x7f -> 0xff is a single bit:
+bit 47, the canonical-form boundary. The low bits are a plausible entry point.
+So this is one wrong bit in the top byte, not a garbage address -- and the top
+byte is exactly COMPUTE_PGM_HI, which carries address bits [47:40] and is
+8 bits wide.
+
+This probe records, for gfx1013 only, the raw interrupt vector and the
+bit-47-cleared reconstruction, so the candidate can be checked against the
+faulting process's GPU VA map offline. If the candidate consistently resolves
+to a mapped code object, the defect is isolated to the top byte of the shader
+program address and the remaining question is who sets bit 47.
+
+It deliberately does not read COMPUTE_PGM_LO/HI. Those are per-pipe CP
+registers behind GRBM indexing and srbm_mutex; this handler runs in hard-IRQ
+context, so reading them here would deadlock. (Reading them from userspace via
+debugfs amdgpu_regs is also known to hang this board.) That measurement needs a
+process-context path and is not attempted here.
+
+Gated by amdgpu.bc250_fault_probe (default on, 0 disables). The module
+parameter doubles as the runtime tell for `arieltune apu patches`.
+
+Signed-off-by: BC-250 Liberation Project <bc250@invalid>
+---
+--- a/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
++++ b/drivers/gpu/drm/amd/amdgpu/gmc_v10_0.c
+@@ -21,6 +21,7 @@
+  *
+  */
+ #include <linux/firmware.h>
++#include <linux/moduleparam.h>
+ #include <linux/pci.h>
+ 
+ #include <drm/drm_cache.h>
+@@ -96,6 +97,26 @@
+ 	return 0;
+ }
+ 
++/*
++ * BC-250 / gfx1013 instruction-fetch fault probe.
++ *
++ * Faults on this part arrive as SQC (inst) reads from an address whose top
++ * byte is 0xff where the process's own code objects live at 0x7f..., i.e. a
++ * 48-bit address with bit 47 set that should be clear. Everything below bit 47
++ * looks like a valid entry point. This probe records the raw interrupt vector
++ * plus the bit-47-cleared reconstruction so the candidate can be checked
++ * against the faulting process's GPU VA map offline.
++ *
++ * Report-only: no register reads, no locks, no control-flow change. It runs
++ * inside the existing ratelimited fault print, which is hard-IRQ context --
++ * reading the CP's COMPUTE_PGM_LO/HI here would need srbm_mutex and would
++ * deadlock, so that measurement needs a process-context path instead.
++ */
++static int bc250_fault_probe = 1;
++module_param_named(bc250_fault_probe, bc250_fault_probe, int, 0644);
++MODULE_PARM_DESC(bc250_fault_probe,
++	"BC-250: extended gfx1013 GPUVM fault diagnostics (0 = off, 1 = on)");
++
+ static int gmc_v10_0_process_interrupt(struct amdgpu_device *adev,
+ 				       struct amdgpu_irq_src *source,
+ 				       struct amdgpu_iv_entry *entry)
+@@ -180,6 +201,23 @@
+ 	if (status != 0)
+ 		hub->vmhub_funcs->print_l2_protection_fault_status(adev,
+ 								   status);
++
++	if (bc250_fault_probe &&
++	    amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(10, 1, 3)) {
++		dev_err(adev->dev,
++			"  BC-250 probe: src_data[0]=0x%08x src_data[1]=0x%08x retry=%d exe=%d write=%d\n",
++			entry->src_data[0], entry->src_data[1],
++			!!(entry->src_data[1] &
++			   AMDGPU_GMC9_FAULT_SOURCE_DATA_RETRY),
++			!!(entry->src_data[1] &
++			   AMDGPU_GMC9_FAULT_SOURCE_DATA_EXE),
++			!!(entry->src_data[1] &
++			   AMDGPU_GMC9_FAULT_SOURCE_DATA_WRITE));
++		dev_err(adev->dev,
++			"  BC-250 probe: fault 0x%016llx bit47=%d candidate 0x%016llx\n",
++			addr, (int)((addr >> 47) & 1),
++			addr & ~(1ULL << 47));
++	}
+ 
+ 	return 0;
+ }

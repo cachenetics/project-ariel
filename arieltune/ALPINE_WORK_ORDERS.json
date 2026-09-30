@@ -1,0 +1,109 @@
+{
+  "orders": [
+    {
+      "chunk": "1-500 (lines 1-500)",
+      "issues": [
+        {
+          "severity": "high",
+          "type": "Arch-specific build tooling",
+          "description": "PKGBUILD is Arch Linux-specific (pacman-based). Alpine uses apk/PKG build files. CLI help text references 'CachyOS PKGBUILD dir'.",
+          "locations": [
+            {"function": "Cmd::Build", "lines": "88"},
+            {"function": "Cmd::Liberate", "lines": "103"}
+          ],
+          "status": "open"
+        },
+        {
+          "severity": "high",
+          "type": "systemd service references in CLI help text",
+          "description": "CLI help text references systemd .service unit names. Alpine uses OpenRC runlevels/scripts. persist.rs auto-detects init system, but CLI help strings still say '.service'",
+          "locations": [
+            {"function": "CoreCmd::Install", "lines": "419"},
+            {"function": "CoreCmd::Uninstall", "lines": "427"}
+          ],
+          "status": "partially-fixed"
+        },
+        {
+          "severity": "high",
+          "type": "Arch initramfs / initcpio references",
+          "description": "Help text references 'initramfs' and 'initcpio' (Arch/Dracut terminology). Alpine uses a different initramfs mechanism (mkimage/initramfs).",
+          "locations": [
+            {"function": "CoreCmd::Acpi::Install", "lines": "432-434"},
+            {"function": "CoreCmd::Acpi::Revert", "lines": "436-441"}
+          ],
+          "status": "open"
+        }
+      ]
+    },
+    {
+      "chunk": "501-800 (lines 501-800)",
+      "issues": [
+        {
+          "severity": "medium",
+          "type": "mkinitcpio tool in output (cu enable)",
+          "description": "CLI prints mkinitcpio -P. Fixed: now reads /etc/alpine-release, shows 'mkimage' for Alpine, 'mkinitcpio -P' for Arch.",
+          "locations": [
+            {"function": "CuCmd::Enable", "lines": "601"}
+          ],
+          "status": "fixed"
+        },
+        {
+          "severity": "high",
+          "type": "Arch install instructions in error message",
+          "description": "Error message for cu health-test shows PKGBUILD/makepkg + pacman install instructions for umr and RADV. Alpine users need apk-based install instructions.",
+          "locations": [
+            {"function": "cmd_cu_test", "lines": "777-781"}
+          ],
+          "status": "open"
+        }
+      ]
+    },
+    {
+      "chunk": "801-900 (lines 801-900)",
+      "issues": [
+        {
+          "severity": "low",
+          "type": "generic-service-term",
+          "description": "The phrase 'boot re-apply service' uses generic terminology. Alpine users expect OpenRC runlevel/script references.",
+          "locations": [
+            {"function": "GpuCmd::Force", "lines": "903"}
+          ],
+          "status": "open"
+        }
+      ]
+    },
+    {
+      "chunk": "cores.rs (full file, ~1000+ lines)",
+      "issues": [
+        {
+          "severity": "high",
+          "type": "systemd service unit format",
+          "description": "The install() function writes a systemd .service unit file with systemd directives (Type=oneshot, RemainAfterExit=yes, WantedBy=multi-user.target). Alpine uses OpenRC runscripts. persist.rs was converted but cores.rs install() was not.",
+          "locations": [
+            {"function": "CoreState::label", "lines": "79-86"},
+            {"function": "UNIT_NAME / UNIT_PATH constants", "lines": "41-42"},
+            {"function": "install() — unit file template", "lines": "386-396"},
+            {"function": "install() — systemctl calls", "lines": "397-403"},
+            {"function": "uninstall() — systemctl calls", "lines": "407-413"},
+            {"function": "boot() — OcQ3 interaction", "lines": "367-384"},
+            {"function": "set_warm_reboot()", "lines": "296-300"}
+          ],
+          "status": "open"
+        },
+        {
+          "severity": "high",
+          "type": "Arch mkinitcpio / initramfs tooling",
+          "description": "acpi_install() and acpi_revert() are entirely Arch-specific: references to /etc/mkinitcpio.conf, parsing HOOKS=(...) syntax, injecting 'acpi_override' hook, running 'mkinitcpio -P'. These functions are unusable on Alpine.",
+          "locations": [
+            {"function": "ACPI_OVERRIDE_DIR / ACPI_BACKUP_DIR constants", "lines": "40-41"},
+            {"function": "MKINITCPIO_CONF / ACPI_BACKUP_DIR constants", "lines": "42-43"},
+            {"function": "acpi_status()", "lines": "522-532"},
+            {"function": "acpi_install() — mkinitcpio.conf parsing + mkinitcpio -P", "lines": "683-744"},
+            {"function": "acpi_revert() — mkinitcpio -P", "lines": "748-767"}
+          ],
+          "status": "open"
+        }
+      ]
+    }
+  ]
+}

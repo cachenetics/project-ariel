@@ -142,15 +142,12 @@ pub fn carrier_present() -> bool {
     nct6686_dir().is_some()
 }
 
-/// The prebuilt writable driver, embedded in the binary, and the exact kernel
-/// its vermagic matches. aputune carries the prebuilt `.ko` and installs it
-/// itself on a matching kernel (fresh blades with no nct6687 installed). The
-/// board CAN also rebuild it in place (its kernel is clang-built: use LLVM=1,
-/// see `kmod/nct6687-bc250/build-and-install.sh`), but the embedded copy keeps
-/// a clean blade fully autonomous. Source + patch + rebuild script:
-/// `kmod/nct6687-bc250/` — rebuild there for a different kernel.
-const NCT6687_KO: &[u8] =
-    include_bytes!("../kmod/nct6687-bc250/prebuilt/nct6687-7.0.9-1-cachyos.ko");
+/// The prebuilt writable driver's location on disk and the kernel release its
+/// vermagic targets. aputune reads the `.ko` at runtime and installs it on a
+/// matching kernel (fresh blades with no nct6687 installed). The board CAN also
+/// rebuild it in place (its kernel is clang-built: use LLVM=1, see
+/// `kmod/nct6687-bc250/build-and-install.sh`).
+const NCT6687_KO: &str = "../kmod/nct6687-bc250/prebuilt/nct6687-7.0.9-1-cachyos.ko";
 const NCT6687_KVER: &str = "7.0.9-1-cachyos";
 
 /// Running kernel release (`uname -r`).

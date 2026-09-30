@@ -1,0 +1,64 @@
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 18:10:36.784492769 +0000
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu11/cyan_skillfish_ppt.c	2026-05-22 18:04:50.810332250 +0000
+@@ -170,6 +170,51 @@
+ 	return ret;
+ }
+ 
++/*
++ * CAC weight readback helper. PMFW msgids 0x2F (GfxCacWeightOperation)
++ * and 0x30 (L3CacWeightOperation) both pack the request as
++ *   arg = (op << 24) | (idx << 8) | value
++ * where op=0 reads the slot, op=1 writes value, op=2 clears. PMFW
++ * returns the current weight in the response arg slot.
++ *
++ * On stock BC-250 firmware, the measured baselines are:
++ *   GfxCacWeightOperation idx 0 -> 0x17 (Sony tuned default)
++ *   L3CacWeightOperation  idx 0 -> 0x00
++ *
++ * Measured on stock PMFW 88.6.0. We log idx 0 once at SMU
++ * init as a smoke-test of the CAC msgid path. Future patches can read
++ * the full 64-slot (gfx) / 80-slot (l3) tables.
++ */
++static int cyan_skillfish_read_cac_weight(struct smu_context *smu,
++					   uint16_t msg, uint8_t idx,
++					   uint32_t *value)
++{
++	uint32_t arg = (uint32_t)idx << 8;	/* op=0 (read), value=0 */
++
++	return smu_cmn_send_smc_msg_with_param(smu, msg, arg, value);
++}
++
++static void cyan_skillfish_log_cac_baseline(struct smu_context *smu)
++{
++	uint32_t gfx_w0 = 0, l3_w0 = 0;
++	int ret;
++
++	ret = cyan_skillfish_read_cac_weight(smu, SMU_MSG_GfxCacWeightOperation,
++					     0, &gfx_w0);
++	if (ret)
++		dev_dbg(smu->adev->dev,
++			"cyan_skillfish: GfxCacWeight[0] read failed (%d)\n", ret);
++	ret = cyan_skillfish_read_cac_weight(smu, SMU_MSG_L3CacWeightOperation,
++					     0, &l3_w0);
++	if (ret)
++		dev_dbg(smu->adev->dev,
++			"cyan_skillfish: L3CacWeight[0] read failed (%d)\n", ret);
++
++	dev_info(smu->adev->dev,
++		 "cyan_skillfish: PMFW CAC baseline — GFX[0]=0x%02x L3[0]=0x%02x\n",
++		 gfx_w0, l3_w0);
++}
++
+ static int cyan_skillfish_init_smc_tables(struct smu_context *smu)
+ {
+ 	int ret;
+@@ -190,6 +235,9 @@
+ 	 */
+ 	(void)cyan_skillfish_start_telemetry(smu);
+ 
++	/* Log CAC baseline; smoke-tests Gfx/L3 CacWeightOperation msgids. */
++	cyan_skillfish_log_cac_baseline(smu);
++
+ 	return 0;
+ }
+ 
