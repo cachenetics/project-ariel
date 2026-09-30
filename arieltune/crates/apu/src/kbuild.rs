@@ -629,10 +629,11 @@ fn post_extract_plan(
     src: &Path,
     uid: Option<u32>,
 ) -> Result<Vec<Step>> {
-    let pkgbuild = opts
-        .pkgbuild_dir
-        .clone()
-        .with_context(|| format!("no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD); {NO_PKGBUILD_HINT}"))?;
+    let pkgbuild = opts.pkgbuild_dir.clone().with_context(|| {
+        format!(
+            "no PKGBUILD dir set (pass --pkgbuild <dir> or APUTUNE_PKGBUILD); {NO_PKGBUILD_HINT}"
+        )
+    })?;
     let mut steps = Vec::new();
 
     // 1. apply each embedded patch into the extracted tree. Plain argv — no
