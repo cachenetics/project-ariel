@@ -1,16 +1,19 @@
-The newline split survives
-persist.rs:238 and :243 still embed \n\t mid-command, so the GENERATED script reads:
+Bug A: the oneshot command lands OUTSIDE start()
+The is_oneshot arm pushes just \t{exec_start}\n at TOP LEVEL - openrc-run SOURCES these scripts for every verb (status, stop, shutdown)
+So the SMU write fires whenever OpenRC merely asks a question, and there is no start() for the oneshot units at all
+Wrap it: start() { <exec>; }
+
+Bug B: is_oneshot never matches the GPU unit
+GPU_UNIT is Type=simple + RemainAfterExit=yes - not Type=oneshot
+Only the cpu-oc and route units are oneshot, and they just got Bug A
+The manual/released-exits-0 behavior you are solving for is RUNTIME state (what apply-boot reads from power.json), not unit type
+Suggested shape, mirrors systemd exactly:
 start() {
-    start-stop-daemon --start --pidfile "$pidfile"
-    --background --exec /usr/local/bin/arieltune -- apu gpu apply-boot
+    if grep -q "force_mhz" /var/lib/aputune/power.json; then
+        /usr/local/bin/arieltune apu gpu apply-boot   # sync, rc tells the story
+    else
+        start-stop-daemon --start --pidfile "$pidfile" --background --exec ... 
+    fi
 }
 
-Shell runs those as TWO commands: line 1 is start-stop-daemon with no --exec (usage error), line 2 tries to run --background as a program
-start() fails on every OpenRC card the moment this merges.
-Fix: one line, or end line 1 with a backslash.
-
-Two smaller ones while you are in there
-.unwrap_or_default() gives an EMPTY exec_start when ExecStart is missing -> --exec  with nothing; the old .unwrap_or("exit 0") was safer, keep trim too
-the one-shot modes question is still open: manual/released apply-boot exits 0 immediately, so --background + pidfile reads died-immediately and the TUI shows dead after a successful pin
-
-One more push and I think you are done with persist.rs.
+Also worth a unit test: assert every generated script contains start() { - that alone would have caught Bug A for all three unit kinds.

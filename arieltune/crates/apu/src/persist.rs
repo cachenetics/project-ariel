@@ -212,8 +212,9 @@ fn install_enable(unit: &str, body: &str) -> Result<()> {
 }
 
 /// Generate an OpenRC init script from a systemd unit body.
-/// Extracts ExecStart, wraps in an OpenRC start() block with pidfile
-/// support so OpenRC can stop/status the running process.
+/// Wraps all units in start() so OpenRC doesn't execute commands on
+/// status/stop verbs (sourcing the script). GPU unit additionally checks
+/// power.json for force_mhz to choose sync apply-boot vs background daemon.
 fn generate_openrc_script(unit_name: &str, body: &str) -> String {
 	let exec_start = body
 		.lines()
@@ -226,19 +227,22 @@ fn generate_openrc_script(unit_name: &str, body: &str) -> String {
 	out.push_str("# Translated from systemd unit for OpenRC compatibility\n");
 	out.push_str("# `arieltune apu` manages this — do not edit manually.\n\n");
 
-	// Detect one-shot units (exit-0 commands like apply-boot for manual/released).
-	// These must NOT use --background (the process exits immediately and OpenRC
-	// marks the unit "dead"), and they don't need a pidfile to track a long-lived
-	// daemon. systemd handles this with Type=oneshot + RemainAfterExit=yes.
-	let is_oneshot = body.lines().any(|l| l.trim() == "Type=oneshot");
+	let pid_name = unit_name.replace(".service", "");
+	out.push_str(&format!("pidfile=/run/{pid_name}.pid\n\n"));
 
-	if is_oneshot {
-		// Run the command directly; OpenRC waits for exit and reports it.
-		out.push_str(&format!("\t{exec_start}\n"));
-	} else {
-		let pid_name = unit_name.replace(".service", "");
-		out.push_str(&format!("pidfile=/run/{pid_name}.pid\n\n"));
+	// Detect the GPU power unit (Type=simple with gpu apply-boot in ExecStart).
+	// It always runs in start() but branches: if power.json has force_mhz,
+	// run apply-boot synchronously (manual pin branch exits 0); otherwise run
+	// the governor/autosleep daemon in background.
+	let is_gpu_unit = body
+		.lines()
+		.any(|l| l.trim().starts_with("ExecStart=") && l.contains("gpu apply-boot"));
+
+	if is_gpu_unit {
 		out.push_str("start() {\n");
+		out.push_str("\tif grep -q \"force_mhz\" /var/lib/aputune/power.json; then\n");
+		out.push_str(&format!("\t\t{exec_start}\n"));
+		out.push_str("\telse\n");
 		let (bin, args) = if let Some(idx) = exec_start.find(' ') {
 			(&exec_start[..idx], &exec_start[idx + 1..])
 		} else {
@@ -247,16 +251,46 @@ fn generate_openrc_script(unit_name: &str, body: &str) -> String {
 
 		if args.is_empty() {
 			out.push_str(&format!(
-				"\tstart-stop-daemon --start --pidfile \"$pidfile\" \\
-\t\t--background --exec {}\n",
+				"\t\tstart-stop-daemon --start --pidfile \"$pidfile\" \\
+\t\t\t--background --exec {}\n",
 				bin
 			));
 		} else {
 			out.push_str(&format!(
-				"\tstart-stop-daemon --start --pidfile \"$pidfile\" \\
-\t\t--background --exec {} -- {}\n",
+				"\t\tstart-stop-daemon --start --pidfile \"$pidfile\" \\
+\t\t\t--background --exec {} -- {}\n",
 				bin, args
 			));
+		}
+		out.push_str("\tfi\n");
+		out.push_str("}\n");
+	} else {
+		let is_oneshot = body.lines().any(|l| l.trim() == "Type=oneshot");
+
+		out.push_str("start() {\n");
+		if is_oneshot {
+			// Run the command directly; OpenRC waits for exit and reports it.
+			out.push_str(&format!("\t{exec_start}\n"));
+		} else {
+			let (bin, args) = if let Some(idx) = exec_start.find(' ') {
+				(&exec_start[..idx], &exec_start[idx + 1..])
+			} else {
+				(exec_start, "")
+			};
+
+			if args.is_empty() {
+				out.push_str(&format!(
+					"\tstart-stop-daemon --start --pidfile \"$pidfile\" \\
+\t\t--background --exec {}\n",
+					bin
+				));
+			} else {
+				out.push_str(&format!(
+					"\tstart-stop-daemon --start --pidfile \"$pidfile\" \\
+\t\t--background --exec {} -- {}\n",
+					bin, args
+				));
+			}
 		}
 		out.push_str("}\n");
 	}
